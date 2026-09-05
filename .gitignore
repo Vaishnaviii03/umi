@@ -1,0 +1,23 @@
+# env / secrets
+.env
+.env.local
+.env.*.local
+
+# node
+node_modules/
+.next/
+frontend/node_modules/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+backend/__pycache__/
+
+# os
+.DS_Store
+
+# desktop build artifacts (future)
+dist/
+out/
