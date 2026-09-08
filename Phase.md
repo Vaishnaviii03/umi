@@ -243,16 +243,16 @@ Give UMI basic productivity capabilities.
 
 ### Checklist
 
-* [ ] 🤖 Create task schema
-* [ ] 🤖 Create task APIs
-* [ ] 🤖 Create task tool
-* [ ] 🤖 Create task UI
-* [ ] 🤖 Create reminder model
-* [ ] 🤖 Implement task creation
-* [ ] 🤖 Implement task retrieval
-* [ ] 🤖 Implement task completion
-* [ ] 🤖 Implement task updates
-* [ ] 🤝 Test natural task commands
+* [x] 🤖 Create task schema
+* [x] 🤖 Create task APIs
+* [x] 🤖 Create task tool
+* [x] 🤖 Create task UI
+* [x] 🤖 Create reminder model
+* [x] 🤖 Implement task creation
+* [x] 🤖 Implement task retrieval
+* [x] 🤖 Implement task completion
+* [x] 🤖 Implement task updates
+* [x] 🤝 Test natural task commands
 
 Example:
 
@@ -262,11 +262,11 @@ UMI should understand the request and create the appropriate task/reminder.
 
 ### Definition of Done
 
-* [ ] Tasks work
-* [ ] Natural language task creation works
-* [ ] Task UI works
-* [ ] Database persistence works
-* [ ] Tests pass
+* [x] Tasks work
+* [x] Natural language task creation works
+* [x] Task UI works
+* [x] Database persistence works
+* [x] Tests pass
 
 ---
 
@@ -278,36 +278,47 @@ Allow UMI to safely interact with Gmail.
 
 ### HUMAN SETUP
 
-* [ ] 👤 Create Google Cloud project
-* [ ] 👤 Enable Gmail API
-* [ ] 👤 Configure OAuth consent
-* [ ] 👤 Create OAuth credentials
-* [ ] 👤 Configure authorized redirect URI
-* [ ] 👤 Connect Google account
-* [ ] 👤 Approve requested permissions
+* [x] 👤 Create Google Cloud project (done — OAuth client exists, credentials live)
+* [x] 👤 Enable Gmail API (done — live API calls verified)
+* [x] 👤 Configure OAuth consent (done — external/test-user consent approved)
+* [x] 👤 Create OAuth credentials (done — GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET in backend/.env)
+* [x] 👤 Configure authorized redirect URI (done — callback live-verified)
+* [x] 👤 Connect Google account (live-verified; OAuth callback + token rebuild working)
+* [x] 👤 Approve requested permissions (done — Gmail + Calendar scopes granted in consent)
+
+> Setup guide (paste into Google Cloud Console):
+> 1. Create a project → **APIs & Services → Library → Gmail API → Enable**.
+> 2. **OAuth consent screen** → External → add yourself as a test user.
+> 3. **Credentials → Create Credentials → OAuth client ID → Web application**.
+> 4. Add **Authorized redirect URI**: `http://127.0.0.1:8000/gmail/oauth/callback`
+>    (must match `GOOGLE_REDIRECT_URI` in `backend/.env`).
+> 5. Put client ID/secret into `backend/.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+> 6. Restart the backend, open the Gmail panel, click **Connect Google**, approve permissions.
+> 7. Tokens are stored at `~/.umi/gmail_token.json` (0600); refresh is automatic.
 
 ### AI IMPLEMENTATION
 
-* [ ] 🤖 Implement OAuth flow
-* [ ] 🤖 Implement token storage
-* [ ] 🤖 Create Gmail integration
-* [ ] 🤖 Create Gmail tool
-* [ ] 🤖 Implement email retrieval
-* [ ] 🤖 Implement email search
-* [ ] 🤖 Implement email summarization
-* [ ] 🤖 Implement importance detection
-* [ ] 🤖 Implement draft generation
-* [ ] 🤖 Implement send confirmation
-* [ ] 🤖 Implement audit logging
+* [x] 🤖 Implement OAuth flow
+* [x] 🤖 Implement token storage
+* [x] 🤖 Create Gmail integration
+* [x] 🤖 Create Gmail tool
+* [x] 🤖 Implement email retrieval
+* [x] 🤖 Implement email search
+* [x] 🤖 Implement email summarization
+* [x] 🤖 Implement importance detection
+* [x] 🤖 Implement draft generation
+* [x] 🤖 Implement send confirmation
+* [x] 🤖 Implement audit logging
+* [x] 🤖 Create Gmail UI (panel, connect, search, drafts, explicit-send)
 
 ### Definition of Done
 
-* [ ] UMI can retrieve emails
-* [ ] UMI can summarize emails
-* [ ] UMI can search emails
-* [ ] UMI can draft responses
-* [ ] Sending requires appropriate confirmation
-* [ ] Credentials are secure
+* [x] UMI can retrieve emails (live-verified with connected account)
+* [x] UMI can summarize emails (live-verified)
+* [x] UMI can search emails (live-verified)
+* [x] UMI can draft responses (draft list/create implemented; live list verified)
+* [x] Sending requires appropriate confirmation (explicit-send gating, unit-tested)
+* [x] Credentials are secure (`~/.umi/gmail_token.json`, mode 0600, never in DB/API)
 
 ---
 
@@ -319,19 +330,19 @@ Connect UMI to the user's calendar.
 
 ### HUMAN SETUP
 
-* [ ] 👤 Enable Calendar API
-* [ ] 👤 Configure OAuth
-* [ ] 👤 Grant required permissions
+* [x] 👤 Enable Calendar API (calendar scopes granted in live consent)
+* [x] 👤 Configure OAuth (same web client + redirect URI as Phase 5)
+* [x] 👤 Grant required permissions (calendar.readonly + calendar.events in granted token — live-verified)
 
 ### AI IMPLEMENTATION
 
-* [ ] 🤖 Create Calendar integration
-* [ ] 🤖 Create Calendar tool
-* [ ] 🤖 Retrieve events
-* [ ] 🤖 Create events
-* [ ] 🤖 Modify events
-* [ ] 🤖 Implement confirmation for sensitive actions
-* [ ] 🤖 Add calendar summaries
+* [x] 🤖 Create Calendar integration (reuses Gmail OAuth token; REST + service; live-verified)
+* [x] 🤖 Create Calendar tool (list/summarize/create/update/delete — registered in tool registry)
+* [x] 🤖 Retrieve events (live-verified)
+* [x] 🤖 Create events (live-verified with real event + cleanup)
+* [x] 🤖 Modify events (API + tool, unit-tested)
+* [x] 🤖 Implement confirmation for sensitive actions (delete_event requires user confirmation, mirrors gmail send gate)
+* [x] 🤖 Add calendar summaries (live-verified)
 
 ### Definition of Done
 
@@ -340,6 +351,8 @@ User can ask:
 > "What's on my calendar tomorrow?"
 
 and UMI can respond accurately.
+
+**Phase 6 complete — events list/create/modify/delete + summaries live-verified with the connected Google account.**
 
 ---
 
@@ -351,16 +364,16 @@ Transform UMI from text assistant into voice assistant.
 
 ### Checklist
 
-* [ ] 👤 Select speech-to-text provider
-* [ ] 👤 Select text-to-speech provider
-* [ ] 👤 Configure credentials
-* [ ] 🤖 Implement microphone input
-* [ ] 🤖 Implement speech-to-text
-* [ ] 🤖 Connect voice to UMI backend
-* [ ] 🤖 Implement text-to-speech
-* [ ] 🤖 Implement audio output
-* [ ] 🤖 Add voice activity detection
-* [ ] 🤖 Handle interruptions
+* [x] 👤 Select speech-to-text provider (ElevenLabs Scribe realtime primary; browser Web Speech API fallback)
+* [x] 👤 Select text-to-speech provider (local pyttsx3 → macOS NSSpeechSynthesizer → WAV; no external API)
+* [x] 👤 Configure credentials (ELEVENLABS_API_KEY + TTS_VOICE/TTS_RATE/TTS_VOLUME in .env; Web Speech needs no credential)
+* [x] 🤖 Implement microphone input (GET /stt/token single-use token → ElevenLabs mic; Web Speech mic fallback)
+* [x] 🤖 Implement speech-to-text (ElevenLabs Scribe `scribe_v2_realtime`, VAD commit strategy; webkitSpeechRecognition fallback)
+* [x] 🤖 Connect voice to UMI backend (voice session → POST /chat/stream with `voice:true` → SSE chunks → sentence split)
+* [x] 🤖 Implement text-to-speech (POST /tts local synthesis, 503/502 safe fallback) 
+* [x] 🤖 Implement audio output (useTts prefetch queue → single Audio element playback)
+* [x] 🤖 Add voice activity detection (ElevenLabs VAD commit; Web Speech end-of-utterance)
+* [x] 🤖 Handle interruptions (barge-in: tts.stop() + abort + echo-guard vs Umi's own voice)
 * [ ] 🤝 Test natural conversation
 
 ### Definition of Done
@@ -379,7 +392,135 @@ TTS
 Speak back
 ```
 
-works reliably.
+**Phase 7 status — implementation complete and verified as far as the mic/speaker link goes.**
+Live checks on the running backend: `/tts/voices` 200 (184 macOS voices, default Samantha), `POST /tts` returns valid 16-bit PCM WAV, `GET /stt/token` 200 (ElevenLabs key configured), `POST /chat/stream {"voice":true}` streams an 18-chunk reply and the reply round-trips through TTS to a WAV. Frontend now sends `voice:true` on voice turns so replies are tuned for speech (200-token cap, fast model). Test counts: 178 backend + 31 frontend + 8 desktop.
+Remaining gate: the 🤝 natural-conversation test — user speaks into the mic, Umi answers by voice, barge-in while speaking. This is a manual browser/desktop test (mic + speaker + mic permission) and stays open until it passes.
+
+---
+
+# PHASE 7.5 — GOOGLE DRIVE, SHEETS, DOCS & YOUTUBE
+
+## Objective
+
+Extend the single existing Google OAuth connection to cover Drive, Sheets,
+Docs and YouTube — full access, one consent screen, no new credentials.
+Umi can then find/read Drive files, work with spreadsheets and documents, and
+manage the user's own YouTube channel from plain-language requests.
+
+## Design
+
+* One combined consent grants all seven scopes at once: `gmail.modify`,
+  `calendar.readonly`, `calendar.events` (existing) + full `drive`,
+  `spreadsheets`, `documents`, `youtube`.
+* The token stays in `~/.umi/gmail_token.json` (0600, atomic); no new
+  credentials are created and no secrets are ever exposed.
+* Four service packages mirror the Calendar pattern (injectable API +
+  facade, shared `credentials_from_store`), backed by one shared HTTP error
+  mapper (`app/services/google_http.py`) with safe, API-scoped wording.
+* New `GET /google/status` reports granted-vs-required scopes so the frontend
+  can render the six capability chips and a reconnect prompt when an older
+  3-scope token needs reauthorization.
+* 16 new `google_*` tools. Reads are permission 1; create is permission 2;
+  write/upload/update/delete actions are permission 2 **and** require explicit
+  confirmation (same gate as `send_email`/`delete_event`).
+* YouTube uploads default to `private` so nothing is published unintentionally.
+* Google Cloud (manual, once): enable **Drive API**, **Sheets API**, **Docs
+  API** and **YouTube Data API v3** in the same project as the existing OAuth
+  client, then reconnect from the Gmail panel. Older tokens are detected and
+  surfaced automatically via `needs_reauthorization`.
+
+### HUMAN
+
+* [ ] 👤 Enable Google Drive API — Cloud Console → APIs & Services → Library
+* [ ] 👤 Enable Google Sheets API (same project)
+* [ ] 👤 Enable Google Docs API (same project)
+* [ ] 👤 Enable YouTube Data API v3 (same project)
+* [ ] 👤 Reconnect Google account (one consent now grants all six scopes)
+* [ ] 👤 Live E2E check: Drive → Sheets → Docs → YouTube real calls
+
+### AI
+
+* [x] 🤖 Expand `GOOGLE_SCOPES` to the 7-scope set (single source of truth)
+* [x] 🤖 Drive service — search/get/read (Google-native export + media download, base64 for binary)
+* [x] 🤖 Sheets service — find/read/write/create with cell-count guards
+* [x] 🤖 Docs service — find/read/create/update with table-aware text extraction
+* [x] 🤖 YouTube service — search/info/uploads/update/upload/delete (private-default uploads)
+* [x] 🤖 Shared Google HTTP error mapping (API-disabled / not-connected / 404 / 429 / permission)
+* [x] 🤖 `/google/status` router — granted vs required scopes, no token leakage
+* [x] 🤖 16 `google_*` tools registered with correct permission + confirmation flags
+* [x] 🤖 GmailPanel — six capability chips + reauth CTA (single Connect button)
+* [ ] 🤖 Live-verify all six services end-to-end through the chat loop
+
+**Phase 7.5 status — implemented; live E2E pending 👤 reconnect.** Scope saga is
+green (3 scope tests), 30+ service tests across Drive/Sheets/Docs/YouTube, 22
+tool/policy tests, /google/status router tests, and 9 frontend capability-chip
+tests. Full suites: 259 backend + 40 frontend + 8 desktop, lint + build clean.
+
+---
+
+# PHASE 7.8 — DISCORD + TELEGRAM INTEGRATIONS
+
+## Objective
+
+Let the Boss reach Umi from Discord (private DMs and a personal server) and
+Telegram (private chat) as a **second owner channel** — the same Umi, the same
+Boss profile, the same tools, clamped by the same safety rules. Both
+integrations are strictly owner-only with hard confirmation blocking for
+dangerous tools.
+
+The settled plan (design, file-by-file steps, verification) lives in
+`docs/superpowers/plans/2026-09-08-discord-telegram-integration.md`.
+
+## Design
+
+* Two adapter workers (discord.py 2.4.0 on a daemon thread; raw httpx
+  long-poll for Telegram) normalize inbound messages to a `PlatformMessage`,
+  authorize via `resolve_role`, and route through the existing synchronous
+  `handle_message` pipeline — LLM/tools/memory are identical to desktop/voice.
+* Workers are owned by `IntegrationSupervisor`, started/stopped from the
+  FastAPI lifespan; failures only flip status and never kill uvicorn.
+* Each platform gets its own conversation thread (new `Conversation.source` +
+  `conversation_key` columns; manual Supabase migration `0002`), so history
+  is per-chat while memories stay shared.
+* Owner-only: messages from anyone else are refused politely with **no** LLM,
+  database, or tool interaction. `❌ confirm` gated tools (send email, delete
+  event, Drive/Docs writes, publish…) are **blocked** with guidance to use the
+  desktop app — adapters never bypass `confirmed`.
+* A compact `GET /integrations/status` endpoint (plus two chips in the
+  GmailPanel) shows live status; it never contains token material.
+* Credentials are backend-only secrets (`backend/.env`, keys labeled "Phase 8"
+  per the user's spec numbering in `backend/.env.example`) and never appear in
+  logs — httpx URL logging is suppressed because the Telegram token lives in
+  the request URL path.
+
+### HUMAN
+
+* [ ] 👤 Create the Discord bot (Developer Portal, Message Content Intent) and
+      add it to a private server and/or your DMs
+* [ ] 👤 Create the Telegram bot via @BotFather (and find your user id via
+      @userinfobot)
+* [ ] 👤 Paste the six keys into `backend/.env` (see `backend/.env.example`)
+* [ ] 👤 Run the Supabase migration once:
+      `psql <DATABASE_URL> -f backend/migrations/0002_add_conversation_source.sql`
+* [ ] 👤 Live smoke tests on both platforms —
+      `"Umi, say hello"`, `"Umi, what is my name?"`, `"Umi, what's on my calendar today?"`
+
+### AI
+
+* [x] 🤖 Config: six integration keys + `discord_enabled`/`telegram_enabled` props
+* [x] 🤖 Authz: `resolve_role` (owner/unknown) + polite refusal text, no LLM/DB on refusal
+* [x] 🤖 PlatformMessage normalization + shared `respond_to` with platform context
+* [x] 🤖 Conversation source/thread columns + repo lookup + migration `0002`
+* [x] 🤖 Orchestrator `source`/`conversation_key`/`platform_context` passthrough
+* [x] 🤖 Telegram: Bot API client + offset-acked long-poll worker (401 → error, backoff on network)
+* [x] 🤖 Discord: gateway bot worker (DM + "server · #channel" threads, bots ignored)
+* [x] 🤖 IntegrationSupervisor — daemon threads, `GET /integrations/status`, lifespan wiring
+* [x] 🤖 Frontend: Discord/Telegram status chips in the GmailPanel
+
+**Phase 7.8 status — implemented; live E2E pending 👤 credentials + smoke
+tests.** Backend 297 tests incl. integrations (config, authz, db, orchestrator,
+shared, supervisor, telegram, discord, status API), frontend 43 incl. chip-state
+tests, desktop 8, lint + build clean.
 
 ---
 
@@ -643,22 +784,26 @@ These should not be part of the initial product roadmap.
 
 ## Tools
 
-* [ ] Tool interface
-* [ ] Tool registry
-* [ ] Permission system
-* [ ] Tool execution
-* [ ] Tool logging
+* [x] Tool interface
+* [x] Tool registry
+* [x] Permission system
+* [x] Tool execution
+* [x] Tool logging
 
 ## Productivity
 
-* [ ] Tasks
-* [ ] Reminders
-* [ ] Calendar
+* [x] Tasks (Phase 4 — create/list/update/complete/delete via API + UI + LLM tool)
+* [x] Reminders (Phase 4 — tasks with due dates, surfaced on demand; proactive push is Phase 11)
+* [x] Calendar (Phase 6 — events list/create/modify/delete + summaries, live-verified)
 
 ## Integrations
 
-* [ ] Gmail
-* [ ] Calendar
+* [x] Gmail (Phase 5 — OAuth, tokens 0600, list/search/summarize/importance, drafts, gated send, GmailPanel UI)
+* [x] Calendar (Phase 6 — events list/create/modify/delete + summaries, live-verified)
+* [x] Drive (Phase 7.5 — search/get/read via full `drive` scope; live check pending 👤 reconnect)
+* [x] Sheets (Phase 7.5 — find/read/write/create with confirmation-gated writes; live check pending 👤 reconnect)
+* [x] Docs (Phase 7.5 — find/read/create/update with confirmation-gated writes; live check pending 👤 reconnect)
+* [x] YouTube (Phase 7.5 — search/info/uploads + gated update/upload/delete; live check pending 👤 reconnect)
 * [ ] Web
 * [ ] Files
 
