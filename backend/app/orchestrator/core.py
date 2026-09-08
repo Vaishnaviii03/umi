@@ -17,6 +17,7 @@ from app.llm.manager import (
     llm_manager,
 )
 from app.services.local_time import local_time_description
+from app.services.knowledge_service import get_knowledge_service, KnowledgeContext
 
 SYSTEM_PROMPT = (
     "You are Umi, the user's personal AI companion. Be warm, curious, and "
@@ -85,37 +86,72 @@ def _append_cached_message(conversation_id, role: str, content: str) -> None:
         entry[1].append({"role": role, "content": content})
 
 
-def _build_context(db, message: str, conversation_id=None, voice: bool = False, include_memories: bool = True):
-    """Return (system_prompt, memory_block, history, conversation).
+def _build_context(
+    db,
+    message: str,
+    conversation_id=None,
+    voice: bool = False,
+    include_memories: bool = True,
+    include_greeting: bool = False,
+    *,
+    source: str = "desktop",
+    conversation_key: str | None = None,
+    conversation_title: str = "Conversation",
+    platform_context: str | None = None,
+):
+    """Return (system_prompt, context_block, history, conversation).
 
-    Conversation history is capped to the most recent messages and the memory
-    block is trimmed so prompt time-to-first-token stays low. Memory retrieval
-    is skipped for fast/casual turns (one less database round trip before the
-    LLM call — they rarely need remembered facts).
+    Builds context with boss profile, relevant memories, and optional greeting.
+    Platform adapters pass ``platform_context`` (appended to the system prompt)
+    and a ``source``/``conversation_key`` so each external channel gets its own
+    isolated conversation thread.
     """
+    system = SYSTEM_PROMPT if not platform_context else f"{SYSTEM_PROMPT}\n\n{platform_context}"
     time_block = f"The user's current local date and time is {local_time_description()}."
 
     if db is None:
-        return SYSTEM_PROMPT, time_block, None, None
+        return system, time_block, None, None
 
-    conversation = get_or_create_conversation(db, conversation_id)
+    conversation = get_or_create_conversation(
+        db,
+        conversation_id,
+        source=source,
+        conversation_key=conversation_key,
+        title=conversation_title,
+    )
     history_limit = VOICE_HISTORY_MESSAGES if voice else TEXT_HISTORY_MESSAGES
     history = _cached_history(conversation.id, history_limit)
     if history is None:
         recent = get_messages(db, conversation.id, limit=24)
         history = [{"role": m.role, "content": m.content} for m in recent][-history_limit:]
         _cache_history(conversation.id, history)
-    memories = (
-        retrieve_relevant_memories(db, message, limit=MEMORY_LIMIT)
-        if include_memories
-        else []
+
+    # Use knowledge service for profile-aware context
+    knowledge = get_knowledge_service()
+    knowledge_context = knowledge.build_context(
+        user_message=message,
+        db=db,
+        include_greeting=include_greeting,
+        greeting_context="voice_chat" if voice else "text_chat",
     )
 
-    memory_block = "\n".join(
-        f"- {m.content[:MAX_MEMORY_ITEM_CHARS]}" for m in memories
-    )
-    context_block = f"{time_block}\n{memory_block}" if memory_block else time_block
-    return SYSTEM_PROMPT, context_block, history, conversation
+    # Build memory block from relevant memories
+    memory_lines = []
+    if knowledge_context.relevant_memories:
+        memory_lines.extend(f"- {m[:MAX_MEMORY_ITEM_CHARS]}" for m in knowledge_context.relevant_memories)
+
+    # Add profile context
+    profile_text = knowledge_context.profile_summary
+
+    # Build context block
+    context_parts = [time_block, profile_text]
+    if memory_lines:
+        context_parts.append("\n".join(memory_lines))
+    if knowledge_context.greeting:
+        context_parts.insert(0, f"[Greeting: {knowledge_context.greeting}]")
+
+    context_block = "\n\n".join(context_parts)
+    return system, context_block, history, conversation
 
 
 def _max_tokens_for(voice: bool, fast: bool) -> int:
@@ -143,7 +179,18 @@ def _persist(db, conversation, message: str, reply: str) -> str | None:
     return str(conversation.id)
 
 
-def handle_message(db, message: str, conversation_id=None, voice: bool = False) -> tuple[str, str | None]:
+def handle_message(
+    db,
+    message: str,
+    conversation_id=None,
+    voice: bool = False,
+    *,
+    source: str = "desktop",
+    conversation_key: str | None = None,
+    conversation_title: str = "Conversation",
+    platform_context: str | None = None,
+    include_greeting: bool | None = None,
+) -> tuple[str, str | None]:
     """Central coordination point for a user request.
 
     - Without a database: replies with no persistence (graceful degradation).
@@ -156,12 +203,25 @@ def handle_message(db, message: str, conversation_id=None, voice: bool = False) 
       from a reliable source rather than guessing.
     """
     fast = voice or _is_casual(message)
+
+    # Check if this is a new conversation (no conversation_id) to include greeting
+    is_new_conversation = conversation_id is None
+
+    # Check if this is a profile query to include full profile
+    knowledge = get_knowledge_service()
+    is_profile_query = knowledge._is_profile_query(message)
+
     system, context_block, history, conversation = _build_context(
         db,
         message,
         conversation_id,
         voice=voice,
         include_memories=not fast,
+        include_greeting=is_new_conversation if include_greeting is None else include_greeting,
+        source=source,
+        conversation_key=conversation_key,
+        conversation_title=conversation_title,
+        platform_context=platform_context,
     )
     reply = llm_manager.generate_reply(
         message,
@@ -171,11 +231,23 @@ def handle_message(db, message: str, conversation_id=None, voice: bool = False) 
         voice=voice,
         fast=fast,
         max_tokens=_max_tokens_for(voice, fast),
+        db=db,
     )
     return reply, _persist(db, conversation, message, reply)
 
 
-def stream_message(db, message: str, conversation_id=None, voice: bool = False) -> Iterator[tuple[str, dict]]:
+def stream_message(
+    db,
+    message: str,
+    conversation_id=None,
+    voice: bool = False,
+    abort_event=None,
+    *,
+    source: str = "desktop",
+    conversation_key: str | None = None,
+    conversation_title: str = "Conversation",
+    platform_context: str | None = None,
+) -> Iterator[tuple[str, dict]]:
     """Stream a single turn as (event, payload) pairs.
 
     Events:
@@ -184,12 +256,22 @@ def stream_message(db, message: str, conversation_id=None, voice: bool = False) 
       ("error", {"detail": <safe user-facing message>, "metrics": {...}})
     """
     fast = voice or _is_casual(message)
+    is_new_conversation = conversation_id is None
+
+    knowledge = get_knowledge_service()
+    is_profile_query = knowledge._is_profile_query(message)
+
     system, context_block, history, conversation = _build_context(
         db,
         message,
         conversation_id,
         voice=voice,
         include_memories=not fast,
+        include_greeting=is_new_conversation,
+        source=source,
+        conversation_key=conversation_key,
+        conversation_title=conversation_title,
+        platform_context=platform_context,
     )
     max_tokens = _max_tokens_for(voice, fast)
     metrics: dict = {}
@@ -204,6 +286,8 @@ def stream_message(db, message: str, conversation_id=None, voice: bool = False) 
             fast=fast,
             max_tokens=max_tokens,
             metrics=metrics,
+            abort_event=abort_event,
+            db=db,
         ):
             parts.append(chunk)
             yield ("chunk", {"text": chunk})
