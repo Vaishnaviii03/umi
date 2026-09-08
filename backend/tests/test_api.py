@@ -81,7 +81,7 @@ def test_post_chat_reaches_backend_from_desktop_origin():
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3456"
 
 
-def _fake_stream(db, message, conversation_id=None, voice=False):
+def _fake_stream(db, message, conversation_id=None, voice=False, proactive=False):
     yield ("chunk", {"text": "Hello"})
     yield ("chunk", {"text": " there."})
     yield (
@@ -107,7 +107,7 @@ def test_chat_stream_returns_sse_text_and_done():
 
 
 def test_chat_stream_error_event_is_safe():
-    def failing_stream(db, message, conversation_id=None, voice=False):
+    def failing_stream(db, message, conversation_id=None, voice=False, proactive=False):
         yield ("error", {"detail": "Umi couldn't reach the reasoning engine right now.", "metrics": {}})
 
     with patch("app.api.routes.stream_message", side_effect=failing_stream):

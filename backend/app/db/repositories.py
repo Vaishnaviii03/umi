@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import Conversation, Memory, Message, Task, utcnow
+from app.services.idle_policy import IdleDecision, evaluate_idle
 
 # The local owner is a real Supabase Auth user (see backend/.env UMI_OWNER_ID);
 # scaffold FKs for conversations/memories point at auth.users.
@@ -32,9 +33,18 @@ def get_or_create_conversation(
     ``conversation_key`` so each server/channel/chat gets its own isolated
     thread while memories stay shared.
     """
+    if isinstance(conversation_id, str):
+        try:
+            conversation_id = uuid.UUID(conversation_id)
+        except ValueError:
+            conversation_id = None
     if conversation_id is not None:
         conv = db.get(Conversation, conversation_id)
         if conv is not None and conv.user_id == OWNER_USER_ID:
+            # A "_was_created" marker set during an earlier create in the same
+            # session must never make this resumed conversation look fresh.
+            if getattr(conv, "_was_created", False):
+                delattr(conv, "_was_created")
             return conv
     query = db.query(Conversation).filter(
         Conversation.user_id == OWNER_USER_ID,
@@ -86,6 +96,73 @@ def greeting_owed(db: Session, conversation: Conversation, *, now: datetime | No
 def claim_greeting(db: Session, conversation: Conversation, *, now: datetime | None = None) -> None:
     """Stamp the conversation as greeted (exactly-once entitlement)."""
     conversation.last_greeted_at = now or utcnow()
+    db.flush()
+
+
+# --------------------------------------------------------------------------- #
+# Proactive (idle) policy
+# --------------------------------------------------------------------------- #
+def _roll_over_proactive_counter(conversation: Conversation, now: datetime) -> None:
+    """Reset the rolling hourly cap when an hour has passed since the last
+    proactive turn (applied lazily on read so the check never spuriously caps)."""
+    if conversation.last_proactive_at is None:
+        return
+    if now - conversation.last_proactive_at >= timedelta(hours=1):
+        conversation.proactive_count_last_hour = 0
+
+
+def get_last_user_activity(db: Session, conversation: Conversation) -> datetime:
+    """Most recent point at which the owner actually spoke, else conversation
+    creation (a brand-new thread counts as "just active" — never ambush it)."""
+    msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id, Message.role == "user")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if msg is not None and msg.created_at is not None:
+        created = msg.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created
+    created_at = conversation.created_at
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at or utcnow()
+
+
+def evaluate_proactive_entitlement(
+    db: Session, conversation: Conversation, *, now: datetime | None = None
+) -> IdleDecision:
+    """Whether Umi may open a proactive turn in this conversation right now.
+
+    Last activity is measured from the owner's most recent message, so a
+    proactive opener that just fired does not count as the owner's activity.
+    """
+    now = now or utcnow()
+    _roll_over_proactive_counter(conversation, now)
+    last_activity = get_last_user_activity(db, conversation)
+    return evaluate_idle(
+        now=now,
+        last_activity_at=last_activity,
+        last_proactive_at=conversation.last_proactive_at,
+        proactive_count_last_hour=conversation.proactive_count_last_hour,
+    )
+
+
+def record_proactive(
+    db: Session, conversation: Conversation, *, now: datetime | None = None
+) -> None:
+    """Count a proactive opener (updates cooldown pin + rolling hourly cap)."""
+    now = now or utcnow()
+    _roll_over_proactive_counter(conversation, now)
+    if conversation.last_proactive_at is None or (
+        now - conversation.last_proactive_at >= timedelta(hours=1)
+    ):
+        conversation.proactive_count_last_hour = 1
+    else:
+        conversation.proactive_count_last_hour += 1
+    conversation.last_proactive_at = now
     db.flush()
 
 

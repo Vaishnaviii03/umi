@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session  # type: ignore[reportMissingImports]
 
 from app.db import models
@@ -26,7 +26,11 @@ from app.db.repositories import (
 )
 from app.db.session import get_db
 from app.llm.manager import LLMError
-from app.orchestrator.core import handle_message, stream_message
+from app.orchestrator.core import (
+    ProactiveNotAllowed,
+    handle_message,
+    stream_message,
+)
 from app.services.elevenlabs_token import ElevenLabsTokenError, token_minter
 from app.services.idle_policy import idle_policy_payload
 from app.services.local_tts import TTSError, tts_service
@@ -43,9 +47,18 @@ router = APIRouter()
 # Schemas
 # --------------------------------------------------------------------------- #
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(max_length=4000)
     conversation_id: str | None = None
     voice: bool = False
+    # Phase 9 — an idle/proactive opener. True means "no user message exists";
+    # the backend enforces the idle policy and generates Umi's opening line.
+    proactive: bool = False
+
+    @model_validator(mode="after")
+    def _message_required_unless_proactive(self):
+        if not self.message.strip() and not self.proactive:
+            raise ValueError("message must not be empty")
+        return self
 
 
 class ChatResponse(BaseModel):
@@ -192,11 +205,32 @@ def list_tools() -> dict:
     return {"tools": tool_manager.catalog(), "enabled": True}
 
 
+def _proactive_denied_detail(reason: str) -> str:
+    """Map a policy reason to a friendly, internal-free user message."""
+    friendly = {
+        "disabled": "I'm keeping quiet today — proactive greetings are off.",
+        "not-idle-yet": "You just said something — I'll stay out of the way.",
+        "outside-active-hours": "It's outside my active hours — I'll wait.",
+        "within-cooldown": "I spoke up a moment ago — one opener at a time.",
+        "hourly-cap-reached": "I've already reached out enough for now.",
+    }
+    return friendly.get(reason, "I'd rather not interrupt right now.")
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     try:
         reply, conversation_id = handle_message(
-            db, payload.message, payload.conversation_id, voice=payload.voice
+            db,
+            payload.message,
+            payload.conversation_id,
+            voice=payload.voice,
+            proactive=payload.proactive,
+        )
+    except ProactiveNotAllowed as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=_proactive_denied_detail(exc.reason),
         )
     except LLMError:
         logger.exception("chat request failed")
@@ -220,7 +254,11 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)) -> Streamin
     def generate():
         try:
             for event, data in stream_message(
-                db, payload.message, payload.conversation_id, voice=payload.voice
+                db,
+                payload.message,
+                payload.conversation_id,
+                voice=payload.voice,
+                proactive=payload.proactive,
             ):
                 if event == "chunk":
                     yield _sse_event({"text": data["text"]})
@@ -229,7 +267,12 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)) -> Streamin
                     metrics["chat_request_ms"] = round((time.perf_counter() - started) * 1000)
                     metrics["turn_failed"] = True
                     logger.info("[latency] chat turn failed %s", metrics)
-                    yield _sse_event({"error": data["detail"]})
+                    detail = (
+                        _proactive_denied_detail(data["detail"])
+                        if data.get("code") == "proactive-denied"
+                        else data["detail"]
+                    )
+                    yield _sse_event({"error": detail, "code": data.get("code")})
                 elif event == "done":
                     metrics = dict(data.get("metrics") or {})
                     metrics["chat_request_ms"] = round((time.perf_counter() - started) * 1000)

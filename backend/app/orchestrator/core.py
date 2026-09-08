@@ -6,8 +6,10 @@ from collections.abc import Iterator
 from app.db.models import Message, utcnow
 from app.db.repositories import (
     claim_greeting,
+    evaluate_proactive_entitlement,
     get_messages,
     get_or_create_conversation,
+    record_proactive,
     retrieve_relevant_memories,
 )
 from app.llm.manager import (
@@ -38,6 +40,29 @@ SYSTEM_PROMPT = (
 # Casual/short queries and voice turns go to the fast conversational model so
 # Umi answers almost instantly; longer, complex questions keep the flagship.
 CASUAL_MESSAGE_MAX_CHARS = 80
+
+# Proactive (idle) openers: the text the model sees as the triggering message
+# when Umi starts a conversation unprompted. Keeps the spawner honest — Umi can
+# never use the idle path to answer a user turn.
+PROACTIVE_OPENER = (
+    "[Umi is opening this conversation unprompted — the owner has not typed or "
+    "spoken anything. Greet lightly, acknowledge the last topic if there is "
+    "one, stay brief, and end by inviting a short reply.]"
+)
+
+PROACTIVE_GUIDANCE = (
+    "This turn is proactive: you are starting the conversation on your own "
+    "because the owner has been quiet. Keep it short and natural, and do not "
+    "ask a barrage of questions — a single easy reply is enough."
+)
+
+
+class ProactiveNotAllowed(Exception):
+    """Raised when an idle/proactive turn violates the idle policy."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 # Keep active context compact for low prompt-processing latency. The tail
 # matters most, so we take the newest N messages only.
@@ -99,6 +124,7 @@ def _build_context(
     conversation_key: str | None = None,
     conversation_title: str = "Conversation",
     platform_context: str | None = None,
+    proactive: bool = False,
 ):
     """Return (system_prompt, context_block, history, conversation, created_now).
 
@@ -110,6 +136,8 @@ def _build_context(
     each external channel gets its own isolated conversation thread.
     """
     system = SYSTEM_PROMPT if not platform_context else f"{SYSTEM_PROMPT}\n\n{platform_context}"
+    if proactive:
+        system = f"{system}\n\n{PROACTIVE_GUIDANCE}"
     time_block = f"The user's current local date and time is {local_time_description()}."
 
     if db is None:
@@ -122,7 +150,13 @@ def _build_context(
         conversation_key=conversation_key,
         title=conversation_title,
     )
+    # The creator marker is transient and request-scoped: consume it so the
+    # same in-memory object (identity map) never reports "created now" again.
     created_now = bool(getattr(conversation, "_was_created", False))
+    try:
+        delattr(conversation, "_was_created")
+    except AttributeError:
+        pass
     if include_greeting is None:
         # Greet only a genuinely fresh conversation that hasn't already been
         # greeted (e.g. by the desktop's spoken launch greeting).
@@ -173,18 +207,31 @@ def _is_casual(message: str) -> bool:
     return len(message.strip()) <= CASUAL_MESSAGE_MAX_CHARS
 
 
-def _persist(db, conversation, message: str, reply: str) -> str | None:
+def _persist(
+    db, conversation, message: str, reply: str, proactive: bool = False
+) -> str | None:
     if conversation is None:
         return None
-    # Add both rows and commit once so a remote (network) database only costs a
-    # single round trip instead of one flush per row.
-    db.add(Message(conversation_id=conversation.id, role="user", content=message))
+    if not proactive:
+        # A proactive opener never fabricates a user message — only the reply
+        # is stored so conversation history stays truthful.
+        db.add(Message(conversation_id=conversation.id, role="user", content=message))
     db.add(Message(conversation_id=conversation.id, role="assistant", content=reply))
     conversation.updated_at = utcnow()
     db.commit()
-    _append_cached_message(conversation.id, "user", message)
+    if not proactive:
+        _append_cached_message(conversation.id, "user", message)
     _append_cached_message(conversation.id, "assistant", reply)
     return str(conversation.id)
+
+
+def _ensure_proactive_allowed(db, conversation, created_now: bool) -> None:
+    """Enforce the idle policy; raise ``ProactiveNotAllowed`` when refused."""
+    if created_now:
+        raise ProactiveNotAllowed("not-idle-yet")
+    decision = evaluate_proactive_entitlement(db, conversation)
+    if not decision.can_engage:
+        raise ProactiveNotAllowed(decision.reason)
 
 
 def handle_message(
@@ -198,6 +245,7 @@ def handle_message(
     conversation_title: str = "Conversation",
     platform_context: str | None = None,
     include_greeting: bool | None = None,
+    proactive: bool = False,
 ) -> tuple[str, str | None]:
     """Central coordination point for a user request.
 
@@ -207,12 +255,16 @@ def handle_message(
     - `voice=True`: appends voice-specific brevity guidance and the response is
       expected to be read aloud.
     - `fast=True` (voice or short casual messages): routed to the fast model.
+    - `proactive=True`: an idle opener — the idle policy is enforced first and
+      no user message is fabricated; only the reply is persisted.
     - The current local time is always injected so Umi answers time questions
       from a reliable source rather than guessing.
     """
     fast = voice or _is_casual(message)
     knowledge = get_knowledge_service()
     is_profile_query = knowledge._is_profile_query(message)
+    if proactive:
+        include_greeting = False
 
     system, context_block, history, conversation, created_now = _build_context(
         db,
@@ -225,13 +277,17 @@ def handle_message(
         conversation_key=conversation_key,
         conversation_title=conversation_title,
         platform_context=platform_context,
+        proactive=proactive,
     )
+    if proactive:
+        _ensure_proactive_allowed(db, conversation, created_now)
     if include_greeting is not False and created_now:
         # A genuinely new conversation is greeted exactly once; stamp the
         # entitlement so a relaunch inside the greeting window stays silent.
         claim_greeting(db, conversation)
+    llm_message = PROACTIVE_OPENER if proactive else message
     reply = llm_manager.generate_reply(
-        message,
+        llm_message,
         system=system,
         history=history,
         memories=context_block or None,
@@ -240,7 +296,9 @@ def handle_message(
         max_tokens=_max_tokens_for(voice, fast),
         db=db,
     )
-    return reply, _persist(db, conversation, message, reply)
+    if proactive:
+        record_proactive(db, conversation)
+    return reply, _persist(db, conversation, message, reply, proactive=proactive)
 
 
 def stream_message(
@@ -254,6 +312,7 @@ def stream_message(
     conversation_key: str | None = None,
     conversation_title: str = "Conversation",
     platform_context: str | None = None,
+    proactive: bool = False,
 ) -> Iterator[tuple[str, dict]]:
     """Stream a single turn as (event, payload) pairs.
 
@@ -261,6 +320,7 @@ def stream_message(
       ("chunk", {"text": <partial reply text>})
       ("done",  {"reply": <full reply>, "conversation_id": <id|None>, "metrics": {...}})
       ("error", {"detail": <safe user-facing message>, "metrics": {...}})
+    A refused proactive turn yields ("error", {"code": "proactive-denied", ...}).
     """
     fast = voice or _is_casual(message)
     knowledge = get_knowledge_service()
@@ -276,7 +336,14 @@ def stream_message(
         conversation_key=conversation_key,
         conversation_title=conversation_title,
         platform_context=platform_context,
+        proactive=proactive,
     )
+    if proactive:
+        try:
+            _ensure_proactive_allowed(db, conversation, created_now)
+        except ProactiveNotAllowed as exc:
+            yield ("error", {"detail": exc.reason, "code": "proactive-denied", "metrics": {}})
+            return
     if created_now:
         claim_greeting(db, conversation)
     max_tokens = _max_tokens_for(voice, fast)
@@ -284,7 +351,7 @@ def stream_message(
     try:
         parts: list[str] = []
         for chunk in llm_manager.stream_reply(
-            message,
+            PROACTIVE_OPENER if proactive else message,
             system=system,
             history=history,
             memories=context_block or None,
@@ -303,5 +370,9 @@ def stream_message(
         return
 
     reply = "".join(parts)
-    conversation_id_out = _persist(db, conversation, message, reply)
+    if proactive:
+        record_proactive(db, conversation)
+    if proactive:
+        metrics["proactive"] = True
+    conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
     yield ("done", {"reply": reply, "conversation_id": conversation_id_out, "metrics": metrics})
