@@ -25,10 +25,10 @@ from app.db.repositories import (
     update_task,
 )
 from app.db.session import get_db
-from app.config import settings
 from app.llm.manager import LLMError
 from app.orchestrator.core import handle_message, stream_message
 from app.services.elevenlabs_token import ElevenLabsTokenError, token_minter
+from app.services.idle_policy import idle_policy_payload
 from app.services.local_tts import TTSError, tts_service
 from app.tools import tool_manager
 from app.tools.tasks import parse_due_at as _parse_due_at
@@ -379,13 +379,7 @@ def session_state(db: Session = Depends(get_db)) -> SessionOut:
             "owed": greeting_owed(db, conversation),
             "new": bool(getattr(conversation, "_was_created", False)),
         },
-        idle={
-            "enabled": settings.umi_idle_enabled,
-            "threshold_seconds": settings.umi_idle_threshold_seconds,
-            "cooldown_seconds": settings.umi_idle_cooldown_seconds,
-        }
-        if settings.umi_idle_enabled
-        else None,
+        idle=idle_policy_payload(),
         server_time=models.utcnow().isoformat(),
     )
 
