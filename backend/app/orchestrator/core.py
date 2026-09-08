@@ -372,9 +372,11 @@ def handle_message(
     )
     if proactive:
         record_proactive(db, conversation)
-    conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
+    # Auto-capture must run BEFORE _persist so its flush lands in the same
+    # commit; a standalone flush is rolled back when the request closes.
     if not proactive and not voice:
         _maybe_autocapture(db, conversation, message)
+    conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
     _log_turn(
         conversation_id_out=conversation_id_out,
         greeted=include_greeting is not False and created_now,
@@ -461,6 +463,8 @@ def stream_message(
         record_proactive(db, conversation)
     if proactive:
         metrics["proactive"] = True
+    if not proactive and not voice:
+        _maybe_autocapture(db, conversation, message)
     conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
     _log_turn(
         conversation_id_out=conversation_id_out,
