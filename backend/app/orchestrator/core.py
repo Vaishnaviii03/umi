@@ -1,11 +1,14 @@
+import logging
+import re
 import threading
 import time
 from collections import deque
 from collections.abc import Iterator
 
-from app.db.models import Message, utcnow
+from app.db.models import Memory, Message, utcnow
 from app.db.repositories import (
     claim_greeting,
+    create_memory,
     evaluate_proactive_entitlement,
     get_messages,
     get_or_create_conversation,
@@ -21,6 +24,8 @@ from app.llm.manager import (
 )
 from app.services.local_time import local_time_description
 from app.services.knowledge_service import get_knowledge_service, KnowledgeContext
+
+logger = logging.getLogger("umi.orchestrator")
 
 SYSTEM_PROMPT = (
     "You are Umi, the user's personal AI companion. Be warm, curious, and "
@@ -63,6 +68,47 @@ class ProactiveNotAllowed(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+# Auto-capture: cheap, deterministic, no LLM call. A user turn is stored as a
+# memory only when it states a durable fact (preferences, plans, commitments,
+# identity) and is not a question. Bounded to one capture per turn.
+_MEMORY_CAPTURE_PATTERNS = [
+    re.compile(r"\bremember\b", re.I),
+    re.compile(r"\bmy\s+\w+\s+is\b", re.I),  # my name/favorite/goal is ...
+    re.compile(r"\bi['' ]?(ll|will|am going to)\b", re.I),  # i'll / i will / i'm going to
+    re.compile(r"\b(goal|plan|target)\b", re.I),
+    re.compile(r"\b(i like|i love|i prefer|i enjoy)\b", re.I),
+    re.compile(r"\bcall me\b", re.I),
+    re.compile(r"\bcut down on\b|\bstay on track with\b", re.I),
+]
+_MEMORY_MIN_CHARS = 12
+
+
+def _maybe_autocapture(db, conversation, user_message: str):
+    """Store a durable fact from this turn (best effort, never raises)."""
+    try:
+        text = (user_message or "").strip()
+        if db is None or conversation is None or not text:
+            return None
+        if len(text) < _MEMORY_MIN_CHARS or text.endswith("?"):
+            return None
+        if not any(p.search(text) for p in _MEMORY_CAPTURE_PATTERNS):
+            return None
+        # Dedupe on an exact existing memory so repeated phrases don't spam it.
+        existing = (
+            db.query(Memory)
+            .filter(Memory.user_id == conversation.user_id, Memory.content == text)
+            .first()
+        )
+        if existing is not None:
+            return None
+        memory = create_memory(db, text, source_conversation_id=conversation.id)
+        logger.info("memory: auto-captured from turn (%d chars)", len(text))
+        return memory
+    except Exception:
+        logger.warning("memory: auto-capture skipped (%s)", "capture-failed", exc_info=True)
+        return None
 
 # Keep active context compact for low prompt-processing latency. The tail
 # matters most, so we take the newest N messages only.
@@ -175,11 +221,14 @@ def _build_context(
         db=db,
         include_greeting=include_greeting,
         greeting_context="voice_chat" if voice else "text_chat",
+        include_memories=include_memories,
     )
 
-    # Build memory block from relevant memories
+    # Build memory block from relevant memories. Memory layering: casual TEXT
+    # turns keep memories (they are the most common), only voice turns skip the
+    # block to keep the fast voice loop cheap.
     memory_lines = []
-    if knowledge_context.relevant_memories:
+    if include_memories and knowledge_context.relevant_memories:
         memory_lines.extend(f"- {m[:MAX_MEMORY_ITEM_CHARS]}" for m in knowledge_context.relevant_memories)
 
     # Add profile context
@@ -271,7 +320,7 @@ def handle_message(
         message,
         conversation_id,
         voice=voice,
-        include_memories=not fast,
+        include_memories=not voice,
         include_greeting=include_greeting,
         source=source,
         conversation_key=conversation_key,
@@ -298,7 +347,10 @@ def handle_message(
     )
     if proactive:
         record_proactive(db, conversation)
-    return reply, _persist(db, conversation, message, reply, proactive=proactive)
+    conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
+    if not proactive and not voice:
+        _maybe_autocapture(db, conversation, message)
+    return reply, conversation_id_out
 
 
 def stream_message(
@@ -331,7 +383,7 @@ def stream_message(
         message,
         conversation_id,
         voice=voice,
-        include_memories=not fast,
+        include_memories=not voice,
         source=source,
         conversation_key=conversation_key,
         conversation_title=conversation_title,

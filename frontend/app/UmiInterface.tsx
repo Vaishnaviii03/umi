@@ -16,6 +16,8 @@ import { useVoiceSession } from "./hooks/useVoiceSession";
 import { UmiProvider, useUmi } from "./hooks/useUmiState";
 import { traceLatency, nowMs } from "./lib/telemetry";
 import { idleTriggerDue } from "./lib/idle";
+import { onNewTurn, onSentenceSpoken, onTurnFinished } from "./lib/voice/echoPause";
+import type { EchoPauseState } from "./lib/voice/echoPause";
 import { VOICE_UNAVAILABLE_MESSAGE } from "./lib/speech";
 
 const VOICE_NOTE_MS = 4000;
@@ -52,6 +54,9 @@ function UmiExperience() {
   const turnStartAtRef = useRef(0);
   const lastSpokenRef = useRef("");
   const greetedRef = useRef(false);
+  // Echo-pause: the mic is really paused (not just flagged) while Umi speaks,
+  // so her own TTS can never be captured as a fake user turn.
+  const voicePausedRef = useRef<EchoPauseState>("live");
   const umiStateRef = useRef(umi.state);
   useEffect(() => {
     umiStateRef.current = umi.state;
@@ -137,8 +142,14 @@ function UmiExperience() {
     micPausedRef.current = false;
     pendingSpeaksRef.current = 0;
     turnStartAtRef.current = 0;
+    const d = onTurnFinished(voicePausedRef.current);
+    voicePausedRef.current = d.next;
     if (activeRef.current) {
-      void resumeListening().then(() => umi.transition("LISTENING"));
+      // Echo-pause ends here: the turn is fully spoken, so the mic may listen
+      // again for the Boss (never for Umi's own voice — it is no longer being
+      // spoken).
+      const resume = d.resume ? resumeListening() : Promise.resolve();
+      void resume.then(() => umi.transition("LISTENING"));
     } else {
       umi.transition("READY");
     }
@@ -182,12 +193,20 @@ function UmiExperience() {
       pendingSpeaksRef.current = 0;
       streamDoneRef.current = false;
       micPausedRef.current = false;
+      const d = onNewTurn(voicePausedRef.current);
+      voicePausedRef.current = d.next;
+      if (d.resume && activeRef.current) void voice.resumeListening();
       voiceNoteShownRef.current = false;
       umi.transition("THINKING");
     },
     onSentence: (sentence, token) => {
       if (token !== turnTokenRef.current) return;
       micPausedRef.current = true;
+      // Echo-pause: mute the mic for the whole utterance so Umi's own speech
+      // is never captured as a user turn; it resumes when the turn finishes.
+      const d = onSentenceSpoken(voicePausedRef.current, activeRef.current);
+      voicePausedRef.current = d.next;
+      if (d.pause) void voice.pauseListening();
       umi.transition("SPEAKING");
       lastSpokenRef.current = sentence;
       pendingSpeaksRef.current += 1;
