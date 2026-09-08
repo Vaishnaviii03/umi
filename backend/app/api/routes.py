@@ -27,6 +27,7 @@ from app.db.repositories import (
 from app.db.session import get_db
 from app.llm.manager import LLMError
 from app.orchestrator.core import (
+    CASUAL_MESSAGE_MAX_CHARS,
     ProactiveNotAllowed,
     handle_message,
     stream_message,
@@ -277,8 +278,13 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)) -> Streamin
                     metrics = dict(data.get("metrics") or {})
                     metrics["chat_request_ms"] = round((time.perf_counter() - started) * 1000)
                     logger.info(
-                        "[latency] chat turn done chat_request_ms=%s llm_first_token_ms=%s "
-                        "llm_total_ms=%s reply_chars=%s",
+                        "[latency] chat turn done conversation_id=%s greeted=%s proactive=%s fast=%s voice=%s "
+                        "chat_request_ms=%s llm_first_token_ms=%s llm_total_ms=%s reply_chars=%s",
+                        data.get("conversation_id"),
+                        metrics.get("greeted"),
+                        metrics.get("proactive"),
+                        payload.voice or len(payload.message) <= CASUAL_MESSAGE_MAX_CHARS,
+                        payload.voice,
                         metrics.get("chat_request_ms"),
                         metrics.get("llm_first_token_ms"),
                         metrics.get("llm_total_ms"),

@@ -85,6 +85,31 @@ _MEMORY_CAPTURE_PATTERNS = [
 _MEMORY_MIN_CHARS = 12
 
 
+def _log_turn(
+    *,
+    conversation_id_out,
+    greeted: bool,
+    proactive: bool,
+    fast: bool,
+    voice: bool,
+    source: str,
+    messages_in_history: int,
+    reply_chars: int | None = None,
+) -> None:
+    """Structured one-line turn attribution for observability."""
+    logger.info(
+        "turn conversation_id=%s greeted=%s proactive=%s fast=%s voice=%s source=%s messages_in_history=%s reply_chars=%s",
+        conversation_id_out,
+        greeted,
+        proactive,
+        fast,
+        voice,
+        source,
+        messages_in_history,
+        reply_chars if reply_chars is not None else "",
+    )
+
+
 def _maybe_autocapture(db, conversation, user_message: str):
     """Store a durable fact from this turn (best effort, never raises)."""
     try:
@@ -350,6 +375,16 @@ def handle_message(
     conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
     if not proactive and not voice:
         _maybe_autocapture(db, conversation, message)
+    _log_turn(
+        conversation_id_out=conversation_id_out,
+        greeted=include_greeting is not False and created_now,
+        proactive=proactive,
+        fast=fast,
+        voice=voice,
+        source=source,
+        messages_in_history=len(history) if history else 0,
+        reply_chars=len(reply),
+    )
     return reply, conversation_id_out
 
 
@@ -427,4 +462,14 @@ def stream_message(
     if proactive:
         metrics["proactive"] = True
     conversation_id_out = _persist(db, conversation, message, reply, proactive=proactive)
+    _log_turn(
+        conversation_id_out=conversation_id_out,
+        greeted=created_now,
+        proactive=proactive,
+        fast=fast,
+        voice=voice,
+        source=source,
+        messages_in_history=len(history) if history else 0,
+        reply_chars=len(reply),
+    )
     yield ("done", {"reply": reply, "conversation_id": conversation_id_out, "metrics": metrics})
