@@ -8,6 +8,8 @@ import TextInput from "./components/TextInput";
 import UmiCore from "./components/UmiCore";
 import VoiceControl from "./components/VoiceControl";
 import MemoriesPanel from "./MemoriesPanel";
+import TasksPanel from "./TasksPanel";
+import GmailPanel from "./GmailPanel";
 import { useChat } from "./hooks/useChat";
 import { useTts } from "./hooks/useTts";
 import { useVoiceSession } from "./hooks/useVoiceSession";
@@ -17,11 +19,23 @@ import { VOICE_UNAVAILABLE_MESSAGE } from "./lib/speech";
 
 const VOICE_NOTE_MS = 4000;
 
+/** Normalize text for echo-guard comparison (lowercase, alphanumeric only). */
+function normText(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function UmiExperience() {
   const umi = useUmi();
   const [showMemories, setShowMemories] = useState(false);
+  const [showTasks, setShowTasks] = useState(false);
+  const [showGmail, setShowGmail] = useState(false);
   const [showChat, setShowChat] = useState(true);
   const [voiceNote, setVoiceNote] = useState<string | null>(null);
+  const [greetingText, setGreetingText] = useState<string | null>(null);
   const voiceNoteTimerRef = useRef<number | undefined>(undefined);
   const busyRef = useRef(false);
   const thinking = umi.state === "THINKING";
@@ -35,6 +49,8 @@ function UmiExperience() {
   const micPausedRef = useRef(false);
   const voiceNoteShownRef = useRef(false);
   const turnStartAtRef = useRef(0);
+  const lastSpokenRef = useRef("");
+  const greetedRef = useRef(false);
 
   const tts = useTts({
     onAudioStart: useCallback(() => {
@@ -58,8 +74,51 @@ function UmiExperience() {
     voiceNoteTimerRef.current = window.setTimeout(() => setVoiceNote(null), VOICE_NOTE_MS);
   }, []);
 
+  // Desktop startup greeting — spoke, not just shown. Runs after `tts` exists.
+  // Handshake: signal readiness so the desktop replays a GREETING payload that
+  // was emitted before Next.js hydrated (otherwise it would be dropped).
+  useEffect(() => {
+    const umiApi = (window as unknown as {
+      umi?: {
+        onStartupState?: (callback: (payload: { state: string; greeting?: string }) => void) => (() => void) | void;
+        getStartupState?: () => Promise<{ state: string; greeting?: string } | null>;
+        notifyStartupReady?: () => void;
+      };
+    }).umi;
+
+    const handlePayload = (payload: { state: string; greeting?: string }) => {
+      if (payload?.state !== "GREETING" || !payload.greeting) return;
+      if (greetedRef.current) return;
+      greetedRef.current = true;
+      setGreetingText(payload.greeting);
+      umi.greet(payload.greeting);
+      micPausedRef.current = true;
+      lastSpokenRef.current = payload.greeting;
+      void tts
+        .speak(payload.greeting)
+        .catch(() => showVoiceNote())
+        .finally(() => {
+          micPausedRef.current = false;
+          umi.endGreeting();
+        });
+    };
+
+    const cleanup = umiApi?.onStartupState?.(handlePayload);
+    if (umiApi?.notifyStartupReady) {
+      umiApi.notifyStartupReady();
+    }
+    // Pull-based fallback: read the current startup state directly in case the
+    // push/ACK raced a window reload.
+    umiApi?.getStartupState?.().then((p) => {
+      if (p) handlePayload(p);
+    });
+    return () => {
+      if (typeof cleanup === "function") cleanup();
+    };
+  }, [tts, umi, showVoiceNote]);
+
   const voice = useVoiceSession({ onCommittedText: startTurn });
-  const { active, activeRef, mode, partial, error, startSession, stopSession, pauseListening, resumeListening } = voice;
+  const { active, activeRef, mode, partial, error, startSession, stopSession, resumeListening } = voice;
 
   const finishTurn = useCallback(() => {
     busyRef.current = false;
@@ -80,12 +139,27 @@ function UmiExperience() {
   }, [finishTurn]);
 
   function startTurn(text: string) {
-    if (busyRef.current) return;
+    const incoming = text.trim();
+    if (!incoming) return;
+    if (busyRef.current) {
+      // Barge-in: the Boss spoke while Umi was thinking/speaking. Ignore an
+      // obvious re-capture of Umi's own voice (turns are mostly long once we
+      // stream), then interrupt the in-flight turn and start a fresh one.
+      const a = normText(incoming);
+      const b = normText(lastSpokenRef.current);
+      const echo = !!a && !!b && (a.includes(b) || b.includes(a));
+      if (echo) return;
+      turnTokenRef.current += 1;
+      tts.stop();
+      chat.cancel();
+      pendingSpeaksRef.current = 0;
+      streamDoneRef.current = false;
+    }
     const token = turnTokenRef.current + 1;
     turnTokenRef.current = token;
     busyRef.current = true;
     turnStartAtRef.current = nowMs();
-    void chat.send(text, token);
+    void chat.send(incoming, token, activeRef.current);
   }
 
   const chat = useChat({
@@ -100,11 +174,9 @@ function UmiExperience() {
     },
     onSentence: (sentence, token) => {
       if (token !== turnTokenRef.current) return;
-      if (!micPausedRef.current) {
-        micPausedRef.current = true;
-        if (activeRef.current) void pauseListening();
-        umi.transition("SPEAKING");
-      }
+      micPausedRef.current = true;
+      umi.transition("SPEAKING");
+      lastSpokenRef.current = sentence;
       pendingSpeaksRef.current += 1;
       tts
         .speak(sentence)
@@ -155,6 +227,9 @@ function UmiExperience() {
   const liveHint =
     active && !sessionNote ? (partial.trim() ? partial : "listening…") : null;
 
+  // Show greeting text when in GREETING state
+  const showGreeting = umi.state === "GREETING" && greetingText;
+
   return (
     <div className="relative flex h-dvh w-full flex-col overflow-hidden bg-holo-bg">
       <HolographicScene state={umi.state} />
@@ -164,6 +239,24 @@ function UmiExperience() {
 
         <div className="flex flex-1 flex-col items-center justify-start overflow-y-auto px-6">
           <UmiCore state={umi.state} />
+
+          {showGreeting && (
+            <div className="entrance-fade mb-4 text-center text-holo-text/90 text-base font-mono tracking-wide">
+              {greetingText}
+            </div>
+          )}
+
+          {umi.endGreeting && showGreeting && (
+            <button
+              onClick={() => {
+                setGreetingText(null);
+                umi.endGreeting();
+              }}
+              className="entrance-fade mb-4 text-sm text-holo-muted hover:text-holo-text font-mono"
+            >
+              Dismiss
+            </button>
+          )}
           {showChat && (
             <Conversation messages={chat.messages} thinking={thinking} canSpeak={false} />
           )}
@@ -171,6 +264,18 @@ function UmiExperience() {
           {showMemories && (
             <div className="mb-4 flex w-full justify-center">
               <MemoriesPanel />
+            </div>
+          )}
+
+          {showTasks && (
+            <div className="mb-4 flex w-full justify-center">
+              <TasksPanel />
+            </div>
+          )}
+
+          {showGmail && (
+            <div className="mb-4 flex w-full justify-center">
+              <GmailPanel />
             </div>
           )}
         </div>
@@ -229,6 +334,49 @@ function UmiExperience() {
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M12 3l8 3-8 3-8-3 8-3z" strokeLinecap="round" strokeLinejoin="round" />
                   <path d="M4 9.5l8 3 8-3M4 14l8 3 8-3" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                aria-label="Toggle tasks"
+                title="Tasks"
+                onClick={() => setShowTasks((v) => !v)}
+                className={`grid h-9 w-9 shrink-0 place-items-center rounded-full border transition-colors ${
+                  showTasks
+                    ? "border-holo-border-strong text-holo-magenta"
+                    : "border-holo-border text-holo-muted hover:text-holo-magenta"
+                }`}
+              >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  {showTasks ? (
+                    <>
+                      <path d="M4 12.5l5 5L20 6.5" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M6 19l12 0M6 5l12 0" strokeLinecap="round" />
+                    </>
+                  ) : (
+                    <>
+                      <path d="M4 7c0-1.1.9-2 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M8 9l2.5 2.5L15 7" strokeLinecap="round" strokeLinejoin="round" />
+                    </>
+                  )}
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                aria-label="Toggle Gmail"
+                title="Gmail"
+                onClick={() => setShowGmail((v) => !v)}
+                className={`grid h-9 w-9 shrink-0 place-items-center rounded-full border transition-colors ${
+                  showGmail
+                    ? "border-holo-border-strong text-holo-magenta"
+                    : "border-holo-border text-holo-muted hover:text-holo-magenta"
+                }`}
+              >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M4 6.5h16v11H4z" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M4 7l8 6 8-6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
 
