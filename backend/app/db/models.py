@@ -28,6 +28,9 @@ class User(Base):
     memories: Mapped[list["Memory"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    tasks: Mapped[list["Task"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Conversation(Base):
@@ -38,6 +41,10 @@ class Conversation(Base):
         Uuid(as_uuid=True), ForeignKey("users.id"), index=True
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="Conversation")
+    # Phase 8 — per-platform conversation threads. Desktop/voice rows default
+    # to source='desktop' with a null key; Discord/Telegram rows add their own.
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="desktop")
+    conversation_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -86,6 +93,31 @@ class Memory(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="memories")
+
+
+class Task(Base):
+    """Phase 4 — a to-do / reminder for the owner.
+
+    ``due_at`` is optional: tasks without one are plain to-dos, tasks with one
+    are reminders surfaced on demand (proactive notification is Phase 11). An
+    ``updated_at`` bump on completion keeps the list ordered by recency.
+    """
+
+    __tablename__ = "tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="tasks")
 
 
 UTC = timezone.utc

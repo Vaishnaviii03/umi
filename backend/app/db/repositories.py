@@ -5,7 +5,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import Conversation, Memory, Message
+from app.db.models import Conversation, Memory, Message, Task
 
 # The local owner is a real Supabase Auth user (see backend/.env UMI_OWNER_ID);
 # scaffold FKs for conversations/memories point at auth.users.
@@ -15,21 +15,42 @@ OWNER_USER_ID = uuid.UUID(settings.owner_id)
 # --------------------------------------------------------------------------- #
 # Conversations / messages
 # --------------------------------------------------------------------------- #
-def get_or_create_conversation(db: Session, conversation_id=None) -> Conversation:
-    """Return the requested conversation (if present), else the user's latest,
-    else create a fresh one."""
+def get_or_create_conversation(
+    db: Session,
+    conversation_id=None,
+    *,
+    source: str = "desktop",
+    conversation_key: str | None = None,
+    title: str = "Conversation",
+) -> Conversation:
+    """Return the requested conversation (if present), else the owner's latest
+    conversation matching ``source``/``conversation_key``, else create one.
+
+    Desktop callers pass no extras and keep today's behavior (resolve the
+    latest owner conversation). Platform adapters pass ``source`` +
+    ``conversation_key`` so each server/channel/chat gets its own isolated
+    thread while memories stay shared.
+    """
     if conversation_id is not None:
         conv = db.get(Conversation, conversation_id)
         if conv is not None and conv.user_id == OWNER_USER_ID:
             return conv
-    conv = (
-        db.query(Conversation)
-        .filter(Conversation.user_id == OWNER_USER_ID)
-        .order_by(Conversation.updated_at.desc())
-        .first()
+    query = db.query(Conversation).filter(
+        Conversation.user_id == OWNER_USER_ID,
+        Conversation.source == source,
     )
+    if conversation_key is None:
+        query = query.filter(Conversation.conversation_key.is_(None))
+    else:
+        query = query.filter(Conversation.conversation_key == conversation_key)
+    conv = query.order_by(Conversation.updated_at.desc()).first()
     if conv is None:
-        conv = Conversation(user_id=OWNER_USER_ID, title="Conversation")
+        conv = Conversation(
+            user_id=OWNER_USER_ID,
+            title=title,
+            source=source,
+            conversation_key=conversation_key,
+        )
         db.add(conv)
         db.flush()
     return conv
@@ -126,3 +147,57 @@ def retrieve_relevant_memories(db: Session, query: str, limit: int = 5) -> list[
         .limit(limit)
         .all()
     )
+
+
+# --------------------------------------------------------------------------- #
+# Tasks (Phase 4)
+# --------------------------------------------------------------------------- #
+def list_tasks(db: Session, status: str | None = None, limit: int = 200) -> list[Task]:
+    """Owner-scoped task list, most recently updated first.
+
+    ``status`` is ``"pending"`` or ``"done"``; ``None`` returns everything.
+    """
+    query = db.query(Task).filter(Task.user_id == OWNER_USER_ID)
+    if status is not None:
+        query = query.filter(Task.status == status)
+    return query.order_by(Task.updated_at.desc()).limit(limit).all()
+
+
+def create_task(db: Session, title: str, due_at=None) -> Task:
+    task = Task(user_id=OWNER_USER_ID, title=title, due_at=due_at)
+    db.add(task)
+    db.flush()
+    return task
+
+
+def get_task(db: Session, task_id) -> Task | None:
+    task = db.get(Task, task_id)
+    if task is None or task.user_id != OWNER_USER_ID:
+        return None
+    return task
+
+
+def update_task(
+    db: Session, task_id, *, title: str | None = None, due_at=None, status: str | None = None
+) -> Task | None:
+    """Partial update of an owner task. ``None`` fields are left unchanged."""
+    task = get_task(db, task_id)
+    if task is None:
+        return None
+    if title is not None:
+        task.title = title
+    if due_at is not None:
+        task.due_at = due_at
+    if status is not None:
+        task.status = status
+    db.flush()
+    return task
+
+
+def delete_task(db: Session, task_id) -> bool:
+    task = get_task(db, task_id)
+    if task is None:
+        return False
+    db.delete(task)
+    db.flush()
+    return True

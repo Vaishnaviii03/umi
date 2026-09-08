@@ -150,3 +150,44 @@ def test_chat_still_works_when_db_disabled():
         assert response.json() == {"reply": "offline reply", "conversation_id": None}
     finally:
         app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 — per-platform conversation threads
+# --------------------------------------------------------------------------- #
+def test_get_or_create_conversation_with_source(db_session):
+    conv = get_or_create_conversation(
+        db_session, source="discord", conversation_key="111:222", title="Discord · Server · #general"
+    )
+    assert conv.source == "discord"
+    assert conv.conversation_key == "111:222"
+    assert conv.title == "Discord · Server · #general"
+
+    again = get_or_create_conversation(
+        db_session, source="discord", conversation_key="111:222", title="Discord · Server · #general"
+    )
+    assert again.id == conv.id
+    db_session.commit()
+
+
+def test_platform_sources_are_isolated(db_session):
+    discord = get_or_create_conversation(db_session, source="discord", conversation_key="1:2")
+    telegram = get_or_create_conversation(db_session, source="telegram", conversation_key="3")
+    desktop = get_or_create_conversation(db_session)
+    assert discord.id != telegram.id
+    assert telegram.id != desktop.id
+    assert discord.id != desktop.id
+    db_session.commit()
+
+
+def test_desktop_default_preserves_latest_conversation(db_session):
+    from app.db.repositories import OWNER_USER_ID
+    from app.db.models import Conversation
+
+    first = Conversation(user_id=OWNER_USER_ID, title="A", source="desktop")
+    db_session.add(first)
+    db_session.flush()
+    got = get_or_create_conversation(db_session)
+    assert got.id == first.id
+    assert got.source == "desktop"
+    db_session.commit()
