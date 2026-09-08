@@ -1,11 +1,12 @@
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import Conversation, Memory, Message, Task
+from app.db.models import Conversation, Memory, Message, Task, utcnow
 
 # The local owner is a real Supabase Auth user (see backend/.env UMI_OWNER_ID);
 # scaffold FKs for conversations/memories point at auth.users.
@@ -51,9 +52,41 @@ def get_or_create_conversation(
             source=source,
             conversation_key=conversation_key,
         )
+        # Transient marker so callers can tell a genuinely fresh conversation
+        # from a resumed one (used for greeting entitlement). Not a column.
+        conv._was_created = True
         db.add(conv)
         db.flush()
     return conv
+
+
+def greeting_owed(db: Session, conversation: Conversation, *, now: datetime | None = None) -> bool:
+    """Whether a launch greeting is entitled for this conversation.
+
+    Owed when the conversation was just created on this request, or when it
+    was created within the configured greeting window and has never been
+    greeted. Claimed greetings stay silent until a new conversation appears.
+    """
+    if conversation.last_greeted_at is not None:
+        return False
+    if getattr(conversation, "_was_created", False):
+        return True
+    created = conversation.created_at
+    if created is None:
+        return True
+    now = now or utcnow()
+    if created.tzinfo is None:  # SQLite server_default returns a naive value
+        created = created.replace(tzinfo=timezone.utc)
+    age = now - created
+    if age < timedelta(seconds=settings.umi_greeting_window_s):
+        return True
+    return False
+
+
+def claim_greeting(db: Session, conversation: Conversation, *, now: datetime | None = None) -> None:
+    """Stamp the conversation as greeted (exactly-once entitlement)."""
+    conversation.last_greeted_at = now or utcnow()
+    db.flush()
 
 
 def list_conversations(db: Session, limit: int = 50) -> list[Conversation]:

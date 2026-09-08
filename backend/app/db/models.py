@@ -45,6 +45,12 @@ class Conversation(Base):
     # to source='desktop' with a null key; Discord/Telegram rows add their own.
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="desktop")
     conversation_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Phase 9 — greeting-once entitlement. Stays NULL until a launch greeting
+    # has been claimed, so reopening the same conversation inside the greeting
+    # window stays silent while a genuinely new conversation still greets.
+    last_greeted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

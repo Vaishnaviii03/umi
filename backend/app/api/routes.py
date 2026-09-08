@@ -5,25 +5,34 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.orm import Session  # type: ignore[reportMissingImports]
 
 from app.db import models
 from app.db.repositories import (
+    claim_greeting,
     create_memory,
+    create_task,
     delete_memory,
+    delete_task,
     get_conversation,
     get_or_create_conversation,
     get_messages,
+    greeting_owed,
     list_conversations,
     list_memories,
+    list_tasks,
+    update_task,
 )
 from app.db.session import get_db
+from app.config import settings
 from app.llm.manager import LLMError
 from app.orchestrator.core import handle_message, stream_message
 from app.services.elevenlabs_token import ElevenLabsTokenError, token_minter
-from app.services.elevenlabs_tts import TTSError, tts_service
+from app.services.local_tts import TTSError, tts_service
 from app.tools import tool_manager
+from app.tools.tasks import parse_due_at as _parse_due_at
+from app.tools.base import ToolExecutionError
 
 logger = logging.getLogger("umi.api")
 
@@ -42,6 +51,14 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     conversation_id: str | None = None
+
+
+class SessionOut(BaseModel):
+    conversation_id: str
+    resumed: bool
+    greeting: dict
+    idle: dict | None
+    server_time: str
 
 
 class TTSRequest(BaseModel):
@@ -70,6 +87,33 @@ class MemoryOut(BaseModel):
 
 class MemoryCreate(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
+
+
+class TaskOut(BaseModel):
+    id: str
+    title: str
+    status: str
+    due_at: str | None
+    created_at: str
+    updated_at: str
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    due_at: str | None = Field(default=None, max_length=64)
+
+
+class TaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    due_at: str | None = Field(default=None, max_length=64)
+    status: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _status_must_be_valid(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("pending", "done"):
+            raise ValueError("status must be 'pending' or 'done'")
+        return value
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +155,27 @@ def _memory_out(mem: models.Memory) -> MemoryOut:
         created_at=mem.created_at.isoformat(),
         updated_at=mem.updated_at.isoformat(),
     )
+
+
+def _task_out(task: models.Task) -> TaskOut:
+    return TaskOut(
+        id=str(task.id),
+        title=task.title,
+        status=task.status,
+        due_at=task.due_at.isoformat() if task.due_at is not None else None,
+        created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat(),
+    )
+
+
+def _due_at_value(value: str | None):
+    """Parse an ISO due date for API input, or 422 on garbage."""
+    if value is None:
+        return None
+    try:
+        return _parse_due_at(value)
+    except ToolExecutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 # --------------------------------------------------------------------------- #
@@ -221,11 +286,13 @@ def stt_token() -> dict:
 
 @router.post("/tts")
 def text_to_speech(payload: TTSRequest) -> Response:
-    """Synthesize Umi's reply with ElevenLabs and return the audio bytes.
+    """Synthesize Umi's reply locally with pyttsx3 and return WAV bytes.
 
-    Kept separate from /chat so the text response always succeeds even when
-    voice synthesis is unavailable. Failures degrade to a safe message — the
-    API key and provider internals never reach the client.
+    All synthesis happens on this machine via the macOS system speech engine —
+    no external TTS API, no key, no network call. Kept separate from /chat so
+    the text response always succeeds even when voice synthesis is unavailable.
+    Failures degrade to a safe message — provider internals never reach the
+    client. Voice/rate/volume are recorded in the backend logs by the service.
     """
     if not tts_service.is_configured():
         raise HTTPException(
@@ -236,8 +303,8 @@ def text_to_speech(payload: TTSRequest) -> Response:
     started = time.perf_counter()
     try:
         audio = tts_service.synthesize(payload.text, metrics=metrics)
-    except TTSError:
-        logger.exception("tts request failed")
+    except TTSError as exc:
+        logger.exception("tts request failed: %s", exc)
         raise HTTPException(
             status_code=502,
             detail="Umi's voice isn't available right now — text response still works.",
@@ -250,10 +317,32 @@ def text_to_speech(payload: TTSRequest) -> Response:
     )
     return Response(
         content=audio,
-        media_type="audio/mpeg",
+        media_type="audio/wav",
         headers={"Cache-Control": "no-store"},
         status_code=status.HTTP_200_OK,
     )
+
+
+@router.get("/tts/voices")
+def list_tts_voices() -> dict:
+    """Diagnostic: list locally available speech voices (ids/names only)."""
+    if not tts_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Umi's voice isn't configured yet — text response still works.",
+        )
+    try:
+        return {
+            "default_voice": tts_service.current_voice(),
+            "total": len(tts_service.list_voices()),
+            "voices": tts_service.list_voices(),
+        }
+    except TTSError as exc:
+        logger.exception("voices request failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Umi's voice isn't available right now — text response still works.",
+        )
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -267,6 +356,52 @@ def active_conversation_messages(db: Session = Depends(get_db)) -> list[MessageO
     require_db(db)
     conversation = get_or_create_conversation(db, None)
     return [_message_out(m) for m in get_messages(db, conversation.id)]
+
+
+@router.get("/session", response_model=SessionOut)
+def session_state(db: Session = Depends(get_db)) -> SessionOut:
+    """Resume the active desktop conversation and report greeting entitlement.
+
+    Called by the frontend (and pushed to it) at launch. ``conversation_id`` is
+    the conversation the next text/voice turn will join; ``resumed`` says whether
+    it already has history; ``greeting.owed`` is true only when a launch greeting
+    is entitled (new conversation, or an ungreated one inside the greeting
+    window); ``idle`` carries the proactive-conversation policy. This endpoint is
+    read-only — claiming a greeting is a separate, explicit mutation.
+    """
+    require_db(db)
+    conversation = get_or_create_conversation(db, None)
+    resumed = bool(get_messages(db, conversation.id, limit=1))
+    return SessionOut(
+        conversation_id=str(conversation.id),
+        resumed=resumed,
+        greeting={
+            "owed": greeting_owed(db, conversation),
+            "new": bool(getattr(conversation, "_was_created", False)),
+        },
+        idle={
+            "enabled": settings.umi_idle_enabled,
+            "threshold_seconds": settings.umi_idle_threshold_seconds,
+            "cooldown_seconds": settings.umi_idle_cooldown_seconds,
+        }
+        if settings.umi_idle_enabled
+        else None,
+        server_time=models.utcnow().isoformat(),
+    )
+
+
+@router.post("/session/claim-greeting", status_code=204)
+def session_claim_greeting(db: Session = Depends(get_db)) -> Response:
+    """Mark the launch greeting as delivered (exactly-once entitlement).
+
+    The desktop/frontend calls this after actually speaking the greeting so a
+    relaunch inside the same conversation's greeting window stays silent.
+    """
+    require_db(db)
+    conversation = get_or_create_conversation(db, None)
+    claim_greeting(db, conversation)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
@@ -299,4 +434,49 @@ def memories_delete(memory_id: str, db: Session = Depends(get_db)) -> None:
     mem_id = parse_uuid(memory_id, "Memory")
     if not delete_memory(db, mem_id):
         raise HTTPException(status_code=404, detail="Memory not found")
+    db.commit()
+
+
+@router.get("/tasks", response_model=list[TaskOut])
+def tasks(status: str | None = None, db: Session = Depends(get_db)) -> list[TaskOut]:
+    """List the owner's tasks, most recently updated first.
+
+    Query param ``status`` filters to ``pending`` or ``done``.
+    """
+    require_db(db)
+    return [_task_out(t) for t in list_tasks(db, status=status)]
+
+
+@router.post("/tasks", response_model=TaskOut, status_code=201)
+def tasks_create(payload: TaskCreate, db: Session = Depends(get_db)) -> TaskOut:
+    require_db(db)
+    task = create_task(db, payload.title, due_at=_due_at_value(payload.due_at))
+    db.commit()
+    return _task_out(task)
+
+
+@router.patch("/tasks/{task_id}", response_model=TaskOut)
+def tasks_update(task_id: str, payload: TaskUpdate, db: Session = Depends(get_db)) -> TaskOut:
+    require_db(db)
+    t_id = parse_uuid(task_id, "Task")
+    updates: dict = {}
+    if "title" in payload.model_fields_set:
+        updates["title"] = payload.title
+    if "due_at" in payload.model_fields_set:
+        updates["due_at"] = _due_at_value(payload.due_at)
+    if "status" in payload.model_fields_set:
+        updates["status"] = payload.status
+    task = update_task(db, t_id, **updates)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    db.commit()
+    return _task_out(task)
+
+
+@router.delete("/tasks/{task_id}", status_code=204)
+def tasks_delete(task_id: str, db: Session = Depends(get_db)) -> None:
+    require_db(db)
+    t_id = parse_uuid(task_id, "Task")
+    if not delete_task(db, t_id):
+        raise HTTPException(status_code=404, detail="Task not found")
     db.commit()

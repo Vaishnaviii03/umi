@@ -105,5 +105,26 @@ class Settings:
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token)
 
+    # Phase 9 — idle/proactive conversation. Umi may open a conversation after
+    # the owner has been quiet for `umi_idle_threshold_seconds`, at most once
+    # per `umi_idle_cooldown_seconds`, and at most `umi_idle_max_prompts_per_hour`
+    # times an hour, only between `umi_idle_start_hour` and `umi_idle_end_hour`
+    # (local time). The frontend drives the trigger; the backend enforces the
+    # policy and handles `proactive` turns.
+    umi_idle_enabled: bool = (
+        os.environ.get("UMI_IDLE_CONVERSATION_ENABLED", "1").strip().lower()
+        not in ("0", "false", "no")
+    )
+    umi_idle_threshold_seconds: int = int(os.environ.get("UMI_IDLE_THRESHOLD_SECONDS", "45"))
+    umi_idle_cooldown_seconds: int = int(os.environ.get("UMI_IDLE_COOLDOWN_SECONDS", "120"))
+    umi_idle_max_prompts_per_hour: int = int(os.environ.get("UMI_IDLE_MAX_PROMPTS_PER_HOUR", "4"))
+    umi_idle_start_hour: int = int(os.environ.get("UMI_IDLE_START_HOUR", "8"))
+    umi_idle_end_hour: int = int(os.environ.get("UMI_IDLE_END_HOUR", "23"))
+
+    # Phase 9 — greeting entitlement window (seconds). A desktop launch may
+    # greet only within this window of an unconversation's creation; after that
+    # or after a claimed greeting it stays silent.
+    umi_greeting_window_s: int = int(os.environ.get("UMI_GREETING_WINDOW_SECONDS", "90"))
+
 
 settings = Settings()

@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 from app.db.models import Message, utcnow
 from app.db.repositories import (
+    claim_greeting,
     get_messages,
     get_or_create_conversation,
     retrieve_relevant_memories,
@@ -92,25 +93,27 @@ def _build_context(
     conversation_id=None,
     voice: bool = False,
     include_memories: bool = True,
-    include_greeting: bool = False,
+    include_greeting: bool | None = None,
     *,
     source: str = "desktop",
     conversation_key: str | None = None,
     conversation_title: str = "Conversation",
     platform_context: str | None = None,
 ):
-    """Return (system_prompt, context_block, history, conversation).
+    """Return (system_prompt, context_block, history, conversation, created_now).
 
     Builds context with boss profile, relevant memories, and optional greeting.
-    Platform adapters pass ``platform_context`` (appended to the system prompt)
-    and a ``source``/``conversation_key`` so each external channel gets its own
-    isolated conversation thread.
+    ``include_greeting=None`` (the default) means "greet only when the
+    conversation was actually created on this request" — a resumed conversation
+    never re-triggers the greeting. Platform adapters pass ``platform_context``
+    (appended to the system prompt) and a ``source``/``conversation_key`` so
+    each external channel gets its own isolated conversation thread.
     """
     system = SYSTEM_PROMPT if not platform_context else f"{SYSTEM_PROMPT}\n\n{platform_context}"
     time_block = f"The user's current local date and time is {local_time_description()}."
 
     if db is None:
-        return system, time_block, None, None
+        return system, time_block, None, None, False
 
     conversation = get_or_create_conversation(
         db,
@@ -119,6 +122,11 @@ def _build_context(
         conversation_key=conversation_key,
         title=conversation_title,
     )
+    created_now = bool(getattr(conversation, "_was_created", False))
+    if include_greeting is None:
+        # Greet only a genuinely fresh conversation that hasn't already been
+        # greeted (e.g. by the desktop's spoken launch greeting).
+        include_greeting = created_now and conversation.last_greeted_at is None
     history_limit = VOICE_HISTORY_MESSAGES if voice else TEXT_HISTORY_MESSAGES
     history = _cached_history(conversation.id, history_limit)
     if history is None:
@@ -151,7 +159,7 @@ def _build_context(
         context_parts.insert(0, f"[Greeting: {knowledge_context.greeting}]")
 
     context_block = "\n\n".join(context_parts)
-    return system, context_block, history, conversation
+    return system, context_block, history, conversation, created_now
 
 
 def _max_tokens_for(voice: bool, fast: bool) -> int:
@@ -203,26 +211,25 @@ def handle_message(
       from a reliable source rather than guessing.
     """
     fast = voice or _is_casual(message)
-
-    # Check if this is a new conversation (no conversation_id) to include greeting
-    is_new_conversation = conversation_id is None
-
-    # Check if this is a profile query to include full profile
     knowledge = get_knowledge_service()
     is_profile_query = knowledge._is_profile_query(message)
 
-    system, context_block, history, conversation = _build_context(
+    system, context_block, history, conversation, created_now = _build_context(
         db,
         message,
         conversation_id,
         voice=voice,
         include_memories=not fast,
-        include_greeting=is_new_conversation if include_greeting is None else include_greeting,
+        include_greeting=include_greeting,
         source=source,
         conversation_key=conversation_key,
         conversation_title=conversation_title,
         platform_context=platform_context,
     )
+    if include_greeting is not False and created_now:
+        # A genuinely new conversation is greeted exactly once; stamp the
+        # entitlement so a relaunch inside the greeting window stays silent.
+        claim_greeting(db, conversation)
     reply = llm_manager.generate_reply(
         message,
         system=system,
@@ -256,23 +263,22 @@ def stream_message(
       ("error", {"detail": <safe user-facing message>, "metrics": {...}})
     """
     fast = voice or _is_casual(message)
-    is_new_conversation = conversation_id is None
-
     knowledge = get_knowledge_service()
     is_profile_query = knowledge._is_profile_query(message)
 
-    system, context_block, history, conversation = _build_context(
+    system, context_block, history, conversation, created_now = _build_context(
         db,
         message,
         conversation_id,
         voice=voice,
         include_memories=not fast,
-        include_greeting=is_new_conversation,
         source=source,
         conversation_key=conversation_key,
         conversation_title=conversation_title,
         platform_context=platform_context,
     )
+    if created_now:
+        claim_greeting(db, conversation)
     max_tokens = _max_tokens_for(voice, fast)
     metrics: dict = {}
     try:
