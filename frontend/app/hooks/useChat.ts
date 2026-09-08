@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { chatRequestBody, parseSessionResponse, readStoredConversationId, storeConversationId, type SessionInfo } from "../lib/chat";
 import { popCompletedSentences } from "../lib/speech";
 
 export type ChatRole = "user" | "umi";
@@ -15,7 +16,11 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:800
 
 type ChatApi = {
   messages: ChatMessage[];
-  send: (text: string, turnToken: number) => Promise<void>;
+  /** Resumed session state: the conversation the next turn will join. */
+  session: SessionInfo;
+  send: (text: string, turnToken: number, voice?: boolean) => Promise<void>;
+  /** Abort the in-flight request for the current turn (barge-in). */
+  cancel: () => void;
   reset: () => void;
 };
 
@@ -46,10 +51,45 @@ export function useChat(
 ): ChatApi {
   const { onThinking, onSentence, onDone, onError } = dependencies;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [session, setSession] = useState<SessionInfo>({
+    conversationId: null,
+    resumed: false,
+    greetingOwed: false,
+    greetingNew: false,
+    idle: null,
+  });
   const conversationIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const isAbortError = useCallback((err: unknown): boolean => {
+    return err instanceof Error && err.name === "AbortError";
+  }, []);
+
+  const storage = typeof window !== "undefined" ? window.sessionStorage : null;
 
   useEffect(() => {
     let cancelled = false;
+    // Restore a previously persisted conversation so the first turn after a
+    // reload is never sent as conversation_id: null (greeting-once depends on
+    // this, and continuity does too).
+    const stored = readStoredConversationId(storage);
+    if (stored) conversationIdRef.current = stored;
+
+    fetch(`${BACKEND_URL}/session`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const parsed = parseSessionResponse(data);
+        if (parsed.conversationId) {
+          conversationIdRef.current = parsed.conversationId;
+          storeConversationId(storage, parsed.conversationId);
+        }
+        setSession(parsed);
+      })
+      .catch(() => {
+        // Database unavailable — keep any stored id; chat still works.
+      });
+
     fetch(`${BACKEND_URL}/conversations/active/messages`)
       .then((res) => {
         if (!res.ok) return null;
@@ -72,17 +112,15 @@ export function useChat(
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [storage]);
 
   const sendLegacy = useCallback(
-    async (text: string, token: number) => {
+    async (text: string, token: number, voice: boolean, signal?: AbortSignal) => {
       const res = await fetch(`${BACKEND_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          conversation_id: conversationIdRef.current,
-        }),
+        body: JSON.stringify(chatRequestBody(text, conversationIdRef.current, voice)),
+        signal,
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -92,34 +130,43 @@ export function useChat(
         reply: string;
         conversation_id: string | null;
       };
-      if (data.conversation_id) conversationIdRef.current = data.conversation_id;
-      if (data.reply.trim()) onSentence(data.reply, token);
-      onDone(data.reply, token);
-    },
-    [onSentence, onDone],
-  );
+      if (data.conversation_id) {
+        conversationIdRef.current = data.conversation_id;
+        storeConversationId(storage, data.conversation_id);
+      }
+      if (!data.reply.trim()) return;
+    onSentence(data.reply, token);
+    onDone(data.reply, token);
+  },
+  [onSentence, onDone, storage],
+);
 
   const send = useCallback(
-    async (text: string, token: number) => {
+    async (text: string, token: number, voice?: boolean) => {
       const trimmed = text.trim();
       if (!trimmed) return;
 
       setMessages((prev) => [...prev, { id: newId(), role: "user", text: trimmed }]);
       onThinking(token);
 
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const signal = controller.signal;
+
       try {
         const response = await fetch(`${BACKEND_URL}/chat/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: trimmed,
-            conversation_id: conversationIdRef.current,
-          }),
+          body: JSON.stringify(
+            chatRequestBody(trimmed, conversationIdRef.current, voice ?? false),
+          ),
+          signal,
         });
 
         if (response.status === 404 || response.status === 405) {
           // Older backend without SSE — degrade to the non-streaming contract.
-          await sendLegacy(trimmed, token);
+          await sendLegacy(trimmed, token, voice ?? false, signal);
           return;
         }
         if (!response.ok) {
@@ -127,7 +174,7 @@ export function useChat(
           throw new Error(body?.detail ?? "Umi couldn't respond right now.");
         }
         if (!response.body || !response.body.getReader) {
-          await sendLegacy(trimmed, token);
+          await sendLegacy(trimmed, token, voice ?? false, signal);
           return;
         }
 
@@ -187,7 +234,10 @@ export function useChat(
                   if (event.reply != null) {
                     reply = event.reply;
                   }
-                  if (event.conversation_id) conversationIdRef.current = event.conversation_id;
+                  if (event.conversation_id) {
+                    conversationIdRef.current = event.conversation_id;
+                    storeConversationId(storage, event.conversation_id);
+                  }
                   if (sentenceBuffer.trim()) emitSentence(sentenceBuffer.trim());
                   if (umiId === null) {
                     umiId = newId();
@@ -212,17 +262,25 @@ export function useChat(
           reader.releaseLock?.();
         }
       } catch (err) {
+        if (isAbortError(err)) return;
         const message = err instanceof Error ? err.message : "Something went wrong.";
         onError(message, token);
       }
     },
-    [onThinking, onSentence, onDone, onError, sendLegacy],
+    [onThinking, onSentence, onDone, onError, sendLegacy, isAbortError, storage],
   );
 
-  const reset = useCallback(() => {
-    conversationIdRef.current = null;
-    setMessages([]);
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
   }, []);
 
-  return { messages, send, reset };
+  const reset = useCallback(() => {
+    abortRef.current?.abort();
+    conversationIdRef.current = null;
+    storeConversationId(storage, null);
+    setSession({ conversationId: null, resumed: false, greetingOwed: false, greetingNew: false, idle: null });
+    setMessages([]);
+  }, [storage]);
+
+  return { messages, session, send, cancel, reset };
 }
