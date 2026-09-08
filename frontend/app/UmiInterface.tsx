@@ -15,6 +15,7 @@ import { useTts } from "./hooks/useTts";
 import { useVoiceSession } from "./hooks/useVoiceSession";
 import { UmiProvider, useUmi } from "./hooks/useUmiState";
 import { traceLatency, nowMs } from "./lib/telemetry";
+import { idleTriggerDue } from "./lib/idle";
 import { VOICE_UNAVAILABLE_MESSAGE } from "./lib/speech";
 
 const VOICE_NOTE_MS = 4000;
@@ -51,6 +52,17 @@ function UmiExperience() {
   const turnStartAtRef = useRef(0);
   const lastSpokenRef = useRef("");
   const greetedRef = useRef(false);
+  const umiStateRef = useRef(umi.state);
+  useEffect(() => {
+    umiStateRef.current = umi.state;
+  }, [umi.state]);
+  // Idle/proactive tracking: whenever the Boss actually says something the
+  // idle timer resets; proactive openers are rate-limited to the policy.
+  // `null` means "no activity measured yet" (set lazily by the idle sampler).
+  const lastUserActivityRef = useRef<number | null>(null);
+  const lastProactiveAtRef = useRef<number | null>(null);
+  const proactiveCountRef = useRef(0);
+  const idleTimerRef = useRef<number | undefined>(undefined);
 
   const tts = useTts({
     onAudioStart: useCallback(() => {
@@ -141,6 +153,7 @@ function UmiExperience() {
   function startTurn(text: string) {
     const incoming = text.trim();
     if (!incoming) return;
+    lastUserActivityRef.current = nowMs();
     if (busyRef.current) {
       // Barge-in: the Boss spoke while Umi was thinking/speaking. Ignore an
       // obvious re-capture of Umi's own voice (turns are mostly long once we
@@ -214,6 +227,52 @@ function UmiExperience() {
     umi.clearError();
     umi.transition("READY");
   }
+
+  // Idle monitor: after the Boss has been quiet long enough, Umi opens a
+  // proactive conversation (spoken, exactly like a normal reply). The backend
+  // re-enforces the policy and may still decline; these checks only avoid
+  // hammering it between thresholds.
+  const policy = chat.session.idle;
+  useEffect(() => {
+    const sample = () => {
+      if (busyRef.current) return;
+      if (document.hidden) return;
+      const state = umiStateRef.current;
+      if (state === "SPEAKING" || state === "THINKING" || state === "GREETING") return;
+      const now = Date.now();
+      if (lastUserActivityRef.current === null) lastUserActivityRef.current = now;
+      // Rolling hourly window for the local cap mirror.
+      if (
+        lastProactiveAtRef.current !== null &&
+        now - lastProactiveAtRef.current >= 3600_000
+      ) {
+        proactiveCountRef.current = 0;
+      }
+      if (
+        idleTriggerDue({
+          policy,
+          lastActivityAtMs: lastUserActivityRef.current,
+          lastProactiveAtMs: lastProactiveAtRef.current,
+          proactiveCountLastHour: proactiveCountRef.current,
+          nowMs: now,
+        })
+      ) {
+        lastProactiveAtRef.current = now;
+        proactiveCountRef.current += 1;
+        busyRef.current = true;
+        turnStartAtRef.current = now;
+        const token = turnTokenRef.current + 1;
+        turnTokenRef.current = token;
+        void chat.sendProactive(token);
+      }
+    };
+    idleTimerRef.current = window.setInterval(sample, 5000);
+    return () => {
+      if (idleTimerRef.current !== undefined) {
+        window.clearInterval(idleTimerRef.current);
+      }
+    };
+  }, [policy, chat]);
 
   useEffect(() => {
     return () => {

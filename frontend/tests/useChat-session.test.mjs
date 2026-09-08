@@ -9,16 +9,18 @@ import {
   storeConversationId,
 } from "../app/lib/chat.ts";
 
-test("chatRequestBody carries conversation id and voice flag", () => {
+test("chatRequestBody carries conversation id, voice and proactive flags", () => {
   assert.deepEqual(chatRequestBody("hi", "cafebebe-0000-0000-0000-000000000001", true), {
     message: "hi",
     conversation_id: "cafebebe-0000-0000-0000-000000000001",
     voice: true,
+    proactive: false,
   });
-  assert.deepEqual(chatRequestBody("hi", null, false), {
+  assert.deepEqual(chatRequestBody("hi", null, false, true), {
     message: "hi",
     conversation_id: null,
     voice: false,
+    proactive: true,
   });
 });
 
@@ -57,14 +59,28 @@ test("parseSessionResponse extracts the resume fields", () => {
     conversation_id: "abc-123",
     resumed: true,
     greeting: { owed: true, new: false },
-    idle: { enabled: true, threshold_seconds: 45, cooldown_seconds: 120 },
+    idle: {
+      enabled: true,
+      threshold_seconds: 45,
+      cooldown_seconds: 120,
+      max_prompts_per_hour: 4,
+      start_hour: 8,
+      end_hour: 23,
+    },
     server_time: "now",
   });
   assert.equal(parsed.conversationId, "abc-123");
   assert.equal(parsed.resumed, true);
   assert.equal(parsed.greetingOwed, true);
   assert.equal(parsed.greetingNew, false);
-  assert.deepEqual(parsed.idle, { enabled: true, thresholdSeconds: 45, cooldownSeconds: 120 });
+  assert.deepEqual(parsed.idle, {
+    enabled: true,
+    thresholdSeconds: 45,
+    cooldownSeconds: 120,
+    maxPromptsPerHour: 4,
+    startHour: 8,
+    endHour: 23,
+  });
 });
 
 test("parseSessionResponse degrades on malformed or absent payload", () => {

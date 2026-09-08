@@ -19,6 +19,8 @@ type ChatApi = {
   /** Resumed session state: the conversation the next turn will join. */
   session: SessionInfo;
   send: (text: string, turnToken: number, voice?: boolean) => Promise<void>;
+  /** Open a proactive (idle) conversation — no user message, spoken reply. */
+  sendProactive: (turnToken: number) => Promise<void>;
   /** Abort the in-flight request for the current turn (barge-in). */
   cancel: () => void;
   reset: () => void;
@@ -115,11 +117,11 @@ export function useChat(
   }, [storage]);
 
   const sendLegacy = useCallback(
-    async (text: string, token: number, voice: boolean, signal?: AbortSignal) => {
+    async (text: string, token: number, voice: boolean, signal?: AbortSignal, proactive = false) => {
       const res = await fetch(`${BACKEND_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(chatRequestBody(text, conversationIdRef.current, voice)),
+        body: JSON.stringify(chatRequestBody(text, conversationIdRef.current, voice, proactive)),
         signal,
       });
       if (!res.ok) {
@@ -142,11 +144,13 @@ export function useChat(
 );
 
   const send = useCallback(
-    async (text: string, token: number, voice?: boolean) => {
+    async (text: string, token: number, voice?: boolean, proactive = false) => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      if (!proactive && !trimmed) return;
 
-      setMessages((prev) => [...prev, { id: newId(), role: "user", text: trimmed }]);
+      if (!proactive) {
+        setMessages((prev) => [...prev, { id: newId(), role: "user", text: trimmed }]);
+      }
       onThinking(token);
 
       abortRef.current?.abort();
@@ -159,14 +163,14 @@ export function useChat(
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
-            chatRequestBody(trimmed, conversationIdRef.current, voice ?? false),
+            chatRequestBody(trimmed, conversationIdRef.current, voice ?? false, proactive),
           ),
           signal,
         });
 
         if (response.status === 404 || response.status === 405) {
           // Older backend without SSE — degrade to the non-streaming contract.
-          await sendLegacy(trimmed, token, voice ?? false, signal);
+          await sendLegacy(trimmed, token, voice ?? false, signal, proactive);
           return;
         }
         if (!response.ok) {
@@ -174,7 +178,7 @@ export function useChat(
           throw new Error(body?.detail ?? "Umi couldn't respond right now.");
         }
         if (!response.body || !response.body.getReader) {
-          await sendLegacy(trimmed, token, voice ?? false, signal);
+          await sendLegacy(trimmed, token, voice ?? false, signal, proactive);
           return;
         }
 
@@ -274,6 +278,14 @@ export function useChat(
     abortRef.current?.abort();
   }, []);
 
+  const sendProactive = useCallback(
+    async (token: number) => {
+      // No user message, spoken opener — the backend enforces the idle policy.
+      await send("", token, true, true);
+    },
+    [send],
+  );
+
   const reset = useCallback(() => {
     abortRef.current?.abort();
     conversationIdRef.current = null;
@@ -282,5 +294,5 @@ export function useChat(
     setMessages([]);
   }, [storage]);
 
-  return { messages, session, send, cancel, reset };
+  return { messages, session, send, sendProactive, cancel, reset };
 }

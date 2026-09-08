@@ -9,6 +9,7 @@ export type ChatRequestBody = {
   message: string;
   conversation_id: string | null;
   voice: boolean;
+  proactive: boolean;
 };
 
 export type SessionInfo = {
@@ -20,6 +21,9 @@ export type SessionInfo = {
     enabled: boolean;
     thresholdSeconds: number;
     cooldownSeconds: number;
+    maxPromptsPerHour: number;
+    startHour: number;
+    endHour: number;
   } | null;
 };
 
@@ -32,14 +36,15 @@ export type StorageLike = {
 /**
  * Build the request body shared by the streaming and legacy chat endpoints.
  * `voice` lets the backend tune replies for speech (concise, fast model,
- * shorter history).
+ * shorter history). `proactive` marks an idle opener with no user message.
  */
 export function chatRequestBody(
   message: string,
   conversationId: string | null,
   voice: boolean,
+  proactive = false,
 ): ChatRequestBody {
-  return { message, conversation_id: conversationId, voice };
+  return { message, conversation_id: conversationId, voice, proactive };
 }
 
 export function isUuidLike(value: string): boolean {
@@ -82,6 +87,10 @@ export function parseSessionResponse(data: unknown): SessionInfo {
             enabled: idle.enabled !== false,
             thresholdSeconds: idle.threshold_seconds,
             cooldownSeconds: typeof idle.cooldown_seconds === "number" ? idle.cooldown_seconds : 0,
+            maxPromptsPerHour:
+              typeof idle.max_prompts_per_hour === "number" ? idle.max_prompts_per_hour : 0,
+            startHour: typeof idle.start_hour === "number" ? idle.start_hour : 0,
+            endHour: typeof idle.end_hour === "number" ? idle.end_hour : 24,
           }
         : null,
   };
