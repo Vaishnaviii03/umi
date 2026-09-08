@@ -33,3 +33,8 @@ watchfiles==1.2.0
 websockets==17.1
 psycopg[binary]==3.3.5
 SQLAlchemy==2.0.52
+pyttsx3==2.99
+google-api-python-client==2.200.0
+google-auth==2.57.1
+google-auth-oauthlib==1.4.1
+discord.py==2.4.0
