@@ -20,15 +20,18 @@ class Settings:
     def model_for(self, fast: bool) -> str:
         return self.llm_fast_model or self.llm_model if fast else self.llm_model
 
-    # Phase 2.5 — ElevenLabs text-to-speech (voice output). The API key is a
-    # server-side secret; leave empty to disable voice (text still works).
+    # Phase 2.5 — ElevenLabs Scribe realtime STT (voice input). The API key is
+    # a server-side secret; the backend mints short-lived single-use tokens for
+    # the browser. Keep in sync with app/services/elevenlabs_token.py.
     elevenlabs_api_key: str = os.environ.get("ELEVENLABS_API_KEY", "")
-    # Umi's voice is "Ash". Voice IDs are not secrets.
-    elevenlabs_voice_id: str = os.environ.get("ELEVENLABS_VOICE_ID", "m3yAHyFEFKtbCIM5n7GF")
-    # Current-API model. eleven_turbo_v2_5 is deprecated; eleven_flash_v2_5 is
-    # its officially recommended functional replacement (same languages, lower
-    # latency).
-    elevenlabs_model: str = os.environ.get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+    # Local TTS (voice output) via pyttsx3 → macOS system speech. All synthesis
+    # happens on this machine; no external TTS API, no key, no network call.
+    local_tts_voice: str = os.environ.get(
+        "TTS_VOICE", "com.apple.voice.compact.en-US.Samantha"
+    )
+    # Speech rate in words-per-minute (pyttsx3) and volume 0.0–1.0.
+    local_tts_rate: float = float(os.environ.get("TTS_RATE", "180"))
+    local_tts_volume: float = float(os.environ.get("TTS_VOLUME", "1.0"))
 
     # Database (Phase 2). Supabase/PostgreSQL connection string.
     # Leave empty to run without persistence (graceful degradation).
@@ -66,6 +69,41 @@ class Settings:
     # human raises the ceiling.
     tools_enabled: bool = os.environ.get("UMI_TOOLS_ENABLED", "1").strip().lower() not in ("0", "false", "no")
     tools_max_permission_level: int = int(os.environ.get("UMI_TOOLS_MAX_LEVEL", "2"))
+
+    # Phase 5 — Gmail. OAuth 2.0 (Google Cloud project → Gmail API → OAuth
+    # Desktop/Web client). The redirect URI below must be registered in the
+    # Google client under "Authorized redirect URIs". Tokens are saved to a
+    # local, owner-only file (see app/services/gmail/token_store.py) and never
+    # touch the database or the client.
+    google_client_id: str = os.environ.get("GOOGLE_CLIENT_ID", "")
+    google_client_secret: str = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+    google_redirect_uri: str = os.environ.get(
+        "GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/gmail/oauth/callback"
+    )
+    gmail_token_path: str = os.environ.get("GMAIL_TOKEN_PATH", "~/.umi/gmail_token.json")
+
+    @property
+    def gmail_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    # Phase 8 — Discord + Telegram integrations. The tokens are server-side
+    # secrets; they are read from backend/.env and never exposed to the
+    # browser. Owner ids pin which platform user may speak to Umi; every other
+    # user receives a polite refusal with no LLM/tool/database access.
+    discord_application_id: str = os.environ.get("DISCORD_APPLICATION_ID", "")
+    discord_public_key: str = os.environ.get("DISCORD_PUBLIC_KEY", "")
+    discord_bot_token: str = os.environ.get("DISCORD_BOT_TOKEN", "")
+    discord_owner_id: str = os.environ.get("DISCORD_OWNER_ID", "")
+    telegram_bot_token: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    telegram_owner_id: str = os.environ.get("TELEGRAM_OWNER_ID", "")
+
+    @property
+    def discord_enabled(self) -> bool:
+        return bool(self.discord_bot_token)
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.telegram_bot_token)
 
 
 settings = Settings()
