@@ -153,30 +153,30 @@ def test_chat_still_works_when_db_disabled():
 
 
 # --------------------------------------------------------------------------- #
-# Phase 8 — per-platform conversation threads
+# Multi-source conversation threads
 # --------------------------------------------------------------------------- #
 def test_get_or_create_conversation_with_source(db_session):
     conv = get_or_create_conversation(
-        db_session, source="discord", conversation_key="111:222", title="Discord · Server · #general"
+        db_session, source="custom_channel", conversation_key="channel:1", title="Custom Channel"
     )
-    assert conv.source == "discord"
-    assert conv.conversation_key == "111:222"
-    assert conv.title == "Discord · Server · #general"
+    assert conv.source == "custom_channel"
+    assert conv.conversation_key == "channel:1"
+    assert conv.title == "Custom Channel"
 
     again = get_or_create_conversation(
-        db_session, source="discord", conversation_key="111:222", title="Discord · Server · #general"
+        db_session, source="custom_channel", conversation_key="channel:1", title="Custom Channel"
     )
     assert again.id == conv.id
     db_session.commit()
 
 
-def test_platform_sources_are_isolated(db_session):
-    discord = get_or_create_conversation(db_session, source="discord", conversation_key="1:2")
-    telegram = get_or_create_conversation(db_session, source="telegram", conversation_key="3")
+def test_custom_sources_are_isolated(db_session):
+    source_a = get_or_create_conversation(db_session, source="channel_a", conversation_key="1")
+    source_b = get_or_create_conversation(db_session, source="channel_b", conversation_key="2")
     desktop = get_or_create_conversation(db_session)
-    assert discord.id != telegram.id
-    assert telegram.id != desktop.id
-    assert discord.id != desktop.id
+    assert source_a.id != source_b.id
+    assert source_b.id != desktop.id
+    assert source_a.id != desktop.id
     db_session.commit()
 
 

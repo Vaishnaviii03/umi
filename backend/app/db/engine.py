@@ -56,20 +56,65 @@ def get_session_factory():
     return _session_factory
 
 
+_db_failed = False
+
+
 def db_enabled() -> bool:
-    if _session_factory is not None:
-        return True
-    return settings.db_enabled
+    if _db_failed or not settings.db_enabled:
+        return False
+    return _session_factory is not None
+
+
+def _ensure_owner_user() -> None:
+    if _session_factory is None:
+        return
+    try:
+        from app.db.models import User
+        import uuid
+        owner_uuid = uuid.UUID(settings.owner_id)
+        with _session_factory() as session:
+            if not session.get(User, owner_uuid):
+                session.add(User(id=owner_uuid, name="Owner"))
+                session.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger("umi.db").debug("Could not verify owner user: %s", e)
 
 
 def init_db() -> None:
     """Create tables if the database is configured.
 
-    Also usable for test databases (pass a URL via ``configure`` first).
+    If remote database fails (e.g. Supabase paused or unreachable),
+    automatically falls back to local SQLite persistence (~/.umi/umi.db).
     """
+    global _session_factory, _engine, _db_failed
+    from pathlib import Path
+    import logging
     from app.db import models  # noqa: F401  (register models on Base)
 
     engine = get_engine()
-    if engine is None:
-        return
-    Base.metadata.create_all(engine)
+    if engine is not None:
+        try:
+            Base.metadata.create_all(engine)
+            _ensure_owner_user()
+            _db_failed = False
+            logging.getLogger("umi.db").info("Connected to primary database.")
+            return
+        except Exception as exc:
+            logging.getLogger("umi.db").warning(
+                "Primary database connection failed (%s) — falling back to local SQLite", exc
+            )
+
+    # Automatic local SQLite fallback so memories and tasks always work
+    try:
+        local_db_path = Path.home() / ".umi" / "umi.db"
+        local_db_path.parent.mkdir(parents=True, exist_ok=True)
+        configure(f"sqlite:///{local_db_path}")
+        Base.metadata.create_all(_engine)
+        _db_failed = False
+        _ensure_owner_user()
+        logging.getLogger("umi.db").info("Local SQLite database active at %s", local_db_path)
+    except Exception as exc:
+        logging.getLogger("umi.db").error("Failed to initialize database: %s", exc)
+        _db_failed = True
+        _session_factory = None

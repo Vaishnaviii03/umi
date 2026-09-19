@@ -10,6 +10,10 @@ import VoiceControl from "./components/VoiceControl";
 import MemoriesPanel from "./MemoriesPanel";
 import TasksPanel from "./TasksPanel";
 import GmailPanel from "./GmailPanel";
+import VisionHUD from "./components/VisionHUD";
+import NotificationToast from "./components/NotificationToast";
+import { useGestureControl } from "./hooks/useGestureControl";
+import type { GestureDetection } from "./lib/gestures/detector";
 import { useChat } from "./hooks/useChat";
 import { useTts } from "./hooks/useTts";
 import { useVoiceSession } from "./hooks/useVoiceSession";
@@ -19,6 +23,7 @@ import { idleTriggerDue } from "./lib/idle";
 import { onNewTurn, onSentenceSpoken, onTurnFinished } from "./lib/voice/echoPause";
 import type { EchoPauseState } from "./lib/voice/echoPause";
 import { VOICE_UNAVAILABLE_MESSAGE } from "./lib/speech";
+import { isInterruptionPhrase } from "./lib/voice/turn";
 
 const VOICE_NOTE_MS = 4000;
 
@@ -53,6 +58,7 @@ function UmiExperience() {
   const voiceNoteShownRef = useRef(false);
   const turnStartAtRef = useRef(0);
   const lastSpokenRef = useRef("");
+  const spokenSentencesRef = useRef<string[]>([]);
   const greetedRef = useRef(false);
   // Echo-pause: the mic is really paused (not just flagged) while Umi speaks,
   // so her own TTS can never be captured as a fake user turn.
@@ -134,7 +140,21 @@ function UmiExperience() {
     };
   }, [tts, umi, showVoiceNote]);
 
-  const voice = useVoiceSession({ onCommittedText: startTurn });
+  const handlePartialText = useCallback(
+    (partialText: string) => {
+      if (!partialText) return;
+      if (busyRef.current && isInterruptionPhrase(partialText)) {
+        // Immediate audio cutoff on the very first detection of an interrupt word!
+        tts.stop();
+      }
+    },
+    [tts],
+  );
+
+  const voice = useVoiceSession({
+    onCommittedText: startTurn,
+    onPartialText: handlePartialText,
+  });
   const { active, activeRef, mode, partial, error, startSession, stopSession, resumeListening } = voice;
 
   const finishTurn = useCallback(() => {
@@ -145,15 +165,11 @@ function UmiExperience() {
     const d = onTurnFinished(voicePausedRef.current);
     voicePausedRef.current = d.next;
     if (activeRef.current) {
-      // Echo-pause ends here: the turn is fully spoken, so the mic may listen
-      // again for the Boss (never for Umi's own voice — it is no longer being
-      // spoken).
-      const resume = d.resume ? resumeListening() : Promise.resolve();
-      void resume.then(() => umi.transition("LISTENING"));
+      umi.transition("LISTENING");
     } else {
       umi.transition("READY");
     }
-  }, [activeRef, resumeListening, umi]);
+  }, [activeRef, umi]);
 
   const maybeFinish = useCallback(() => {
     if (busyRef.current && streamDoneRef.current && pendingSpeaksRef.current === 0) {
@@ -161,23 +177,34 @@ function UmiExperience() {
     }
   }, [finishTurn]);
 
+  function isEchoOfSpoken(text: string): boolean {
+    const a = normText(text);
+    if (!a) return false;
+    if (isInterruptionPhrase(text)) return false;
+    for (const spoken of spokenSentencesRef.current) {
+      const b = normText(spoken);
+      if (b && (a.includes(b) || b.includes(a))) return true;
+    }
+    return false;
+  }
+
   function startTurn(text: string) {
     const incoming = text.trim();
     if (!incoming) return;
     lastUserActivityRef.current = nowMs();
     if (busyRef.current) {
-      // Barge-in: the Boss spoke while Umi was thinking/speaking. Ignore an
-      // obvious re-capture of Umi's own voice (turns are mostly long once we
-      // stream), then interrupt the in-flight turn and start a fresh one.
-      const a = normText(incoming);
-      const b = normText(lastSpokenRef.current);
-      const echo = !!a && !!b && (a.includes(b) || b.includes(a));
-      if (echo) return;
+      // Barge-in: the Boss spoke while Umi was thinking/speaking.
+      // If it's an interruption command, process immediately.
+      // If it's an echo of Umi's own voice, ignore.
+      if (!isInterruptionPhrase(incoming) && isEchoOfSpoken(incoming)) {
+        return;
+      }
       turnTokenRef.current += 1;
       tts.stop();
       chat.cancel();
       pendingSpeaksRef.current = 0;
       streamDoneRef.current = false;
+      busyRef.current = false;
     }
     const token = turnTokenRef.current + 1;
     turnTokenRef.current = token;
@@ -193,22 +220,18 @@ function UmiExperience() {
       pendingSpeaksRef.current = 0;
       streamDoneRef.current = false;
       micPausedRef.current = false;
+      spokenSentencesRef.current = [];
       const d = onNewTurn(voicePausedRef.current);
       voicePausedRef.current = d.next;
-      if (d.resume && activeRef.current) void voice.resumeListening();
       voiceNoteShownRef.current = false;
       umi.transition("THINKING");
     },
     onSentence: (sentence, token) => {
       if (token !== turnTokenRef.current) return;
-      micPausedRef.current = true;
-      // Echo-pause: mute the mic for the whole utterance so Umi's own speech
-      // is never captured as a user turn; it resumes when the turn finishes.
-      const d = onSentenceSpoken(voicePausedRef.current, activeRef.current);
-      voicePausedRef.current = d.next;
-      if (d.pause) void voice.pauseListening();
+      micPausedRef.current = false;
       umi.transition("SPEAKING");
       lastSpokenRef.current = sentence;
+      spokenSentencesRef.current.push(sentence);
       pendingSpeaksRef.current += 1;
       tts
         .speak(sentence)
@@ -246,6 +269,64 @@ function UmiExperience() {
     umi.clearError();
     umi.transition("READY");
   }
+
+  const [gesturesEnabled, setGesturesEnabled] = useState(false);
+
+  const handleGesture = useCallback(
+    (gesture: GestureDetection) => {
+      if (!gesturesEnabled) return;
+      if (gesture.type === "swipe_right") {
+        if (showChat) {
+          setShowChat(false);
+          setShowMemories(true);
+        } else if (showMemories) {
+          setShowMemories(false);
+          setShowTasks(true);
+        } else if (showTasks) {
+          setShowTasks(false);
+          setShowGmail(true);
+        } else {
+          setShowGmail(false);
+          setShowChat(true);
+        }
+      } else if (gesture.type === "swipe_left") {
+        if (showChat) {
+          setShowChat(false);
+          setShowGmail(true);
+        } else if (showGmail) {
+          setShowGmail(false);
+          setShowTasks(true);
+        } else if (showTasks) {
+          setShowTasks(false);
+          setShowMemories(true);
+        } else {
+          setShowMemories(false);
+          setShowChat(true);
+        }
+      } else if (gesture.type === "open_palm") {
+        tts.stop();
+        if (activeRef.current) {
+          void stopSession();
+          umi.transition("READY");
+        }
+      } else if (gesture.type === "pinch_or_point") {
+        toggleVoice();
+      }
+    },
+    [gesturesEnabled, showChat, showMemories, showTasks, showGmail, tts, activeRef, stopSession, umi, toggleVoice]
+  );
+
+  const {
+    isCameraOn,
+    toggleCamera,
+    captureSnapshot,
+    lastGesture,
+    motionEnergy,
+    triggerManualGesture,
+    setVideoElement,
+    videoRef,
+    error: cameraError,
+  } = useGestureControl({ onGesture: handleGesture });
 
   // Idle monitor: after the Boss has been quiet long enough, Umi opens a
   // proactive conversation (spoken, exactly like a normal reply). The backend
@@ -458,6 +539,23 @@ function UmiExperience() {
                 </svg>
               </button>
 
+              <button
+                type="button"
+                aria-label="Toggle Vision HUD"
+                title={isCameraOn ? "Turn off camera" : "Turn on camera"}
+                onClick={toggleCamera}
+                className={`grid h-9 w-9 shrink-0 place-items-center rounded-full border transition-colors ${
+                  isCameraOn
+                    ? "border-holo-cyan text-holo-cyan shadow-[0_0_12px_rgba(6,182,212,0.35)]"
+                    : "border-holo-border text-holo-muted hover:text-holo-cyan"
+                }`}
+              >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" strokeLinecap="round" strokeLinejoin="round" />
+                  <circle cx="12" cy="13" r="4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+
               <span className="h-5 w-px bg-holo-border" />
 
               <VoiceControl active={active} mode={mode} onToggle={toggleVoice} />
@@ -466,6 +564,23 @@ function UmiExperience() {
           </div>
         </div>
       </div>
+
+      <VisionHUD
+        isCameraOn={isCameraOn}
+        onToggleCamera={toggleCamera}
+        gesturesEnabled={gesturesEnabled}
+        onToggleGestures={() => setGesturesEnabled((v) => !v)}
+        videoRef={videoRef}
+        setVideoElement={setVideoElement}
+        lastGesture={lastGesture}
+        motionEnergy={motionEnergy}
+        onCaptureSnapshot={captureSnapshot}
+        onAskUmiAboutScene={(desc) => startTurn(`I am showing you this via camera: ${desc}. What do you think?`)}
+        onTriggerManualGesture={triggerManualGesture}
+        error={cameraError}
+      />
+
+      <NotificationToast onAskUmi={startTurn} />
     </div>
   );
 }

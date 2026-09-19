@@ -24,23 +24,12 @@ from app.llm.manager import (
 )
 from app.services.local_time import local_time_description
 from app.services.knowledge_service import get_knowledge_service, KnowledgeContext
+from app.orchestrator.soul import get_soul_prompt
 
 logger = logging.getLogger("umi.orchestrator")
 
-SYSTEM_PROMPT = (
-    "You are Umi, the user's personal AI companion. Be warm, curious, and "
-    "intelligent with a scientific frame of mind. Sound like a trusted friend "
-    "who happens to be very knowledgeable. Be concise. Use natural, varied "
-    "language — never robotic fillers like 'How may I assist you today?'."
-    "Your name is Umi (pronounced 'you-me'), and when the user asks your name "
-    "you introduce yourself simply as Umi — never spell it out as U-M-I or "
-    "call yourself UMI. Refer to yourself by name naturally when it fits. "
-    "Acknowledge what the user says, answer what they actually asked, and "
-    "occasionally ask a relevant follow-up — but do NOT end every reply with a "
-    "question; you are having a conversation, not conducting an interview. "
-    "Adapt to the mood of the conversation. Use memories and conversation "
-    "history so the conversation feels continuous."
-)
+SYSTEM_PROMPT = get_soul_prompt()
+
 
 # Casual/short queries and voice turns go to the fast conversational model so
 # Umi answers almost instantly; longer, complex questions keep the flagship.
@@ -68,6 +57,43 @@ class ProactiveNotAllowed(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+INTERRUPTION_REPLY = "Yes Boss? Were you saying something else?"
+
+_INTERRUPT_KEYWORDS = {
+    "stop",
+    "umi stop",
+    "stop umi",
+    "stop please",
+    "please stop",
+    "wait",
+    "umi wait",
+    "wait umi",
+    "hold on",
+    "umi hold on",
+    "hold on umi",
+    "pause",
+    "pause umi",
+    "umi pause",
+    "quiet",
+    "be quiet",
+    "shut up",
+    "shh",
+    "stop it",
+    "stop now",
+    "stop talking",
+    "stop speaking",
+}
+
+
+def is_interruption_command(message: str) -> bool:
+    """Return True if message is an explicit stop/interruption command."""
+    cleaned = re.sub(r"[^a-zA-Z\s]", "", message).strip().lower()
+    words = cleaned.split()
+    if not words or len(words) > 4:
+        return False
+    return cleaned in _INTERRUPT_KEYWORDS or ("stop" in words and len(words) <= 3)
 
 
 # Auto-capture: cheap, deterministic, no LLM call. A user turn is stored as a
@@ -206,7 +232,8 @@ def _build_context(
     (appended to the system prompt) and a ``source``/``conversation_key`` so
     each external channel gets its own isolated conversation thread.
     """
-    system = SYSTEM_PROMPT if not platform_context else f"{SYSTEM_PROMPT}\n\n{platform_context}"
+    base_system = get_soul_prompt()
+    system = base_system if not platform_context else f"{base_system}\n\n{platform_context}"
     if proactive:
         system = f"{system}\n\n{PROACTIVE_GUIDANCE}"
     time_block = f"The user's current local date and time is {local_time_description()}."
@@ -359,6 +386,20 @@ def handle_message(
         # A genuinely new conversation is greeted exactly once; stamp the
         # entitlement so a relaunch inside the greeting window stays silent.
         claim_greeting(db, conversation)
+    if not proactive and is_interruption_command(message):
+        reply = INTERRUPTION_REPLY
+        conversation_id_out = _persist(db, conversation, message, reply, proactive=False)
+        _log_turn(
+            conversation_id_out=conversation_id_out,
+            greeted=include_greeting is not False and created_now,
+            proactive=False,
+            fast=True,
+            voice=voice,
+            source=source,
+            messages_in_history=len(history) if history else 0,
+            reply_chars=len(reply),
+        )
+        return reply, conversation_id_out
     llm_message = PROACTIVE_OPENER if proactive else message
     reply = llm_manager.generate_reply(
         llm_message,
@@ -435,6 +476,22 @@ def stream_message(
             return
     if created_now:
         claim_greeting(db, conversation)
+    if not proactive and is_interruption_command(message):
+        reply = INTERRUPTION_REPLY
+        conversation_id_out = _persist(db, conversation, message, reply, proactive=False)
+        _log_turn(
+            conversation_id_out=conversation_id_out,
+            greeted=created_now,
+            proactive=False,
+            fast=True,
+            voice=voice,
+            source=source,
+            messages_in_history=len(history) if history else 0,
+            reply_chars=len(reply),
+        )
+        yield ("chunk", {"text": reply})
+        yield ("done", {"reply": reply, "conversation_id": conversation_id_out, "metrics": {"interrupted": True}})
+        return
     max_tokens = _max_tokens_for(voice, fast)
     metrics: dict = {}
     try:

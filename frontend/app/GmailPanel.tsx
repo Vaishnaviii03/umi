@@ -15,14 +15,6 @@ import {
   type GmailEmail,
   type GoogleStatus,
 } from "./lib/gmail";
-import {
-  fetchIntegrationsStatus,
-  integrationActive,
-  integrationLabel,
-  integrationStatusLabel,
-  INTEGRATION_PLATFORMS,
-  type IntegrationsStatus,
-} from "./lib/integrations";
 
 const SEND_CONFIRM_TEXT = "I confirm I want to send this draft to the recipient.";
 
@@ -33,7 +25,6 @@ export default function GmailPanel() {
   const [connected, setConnected] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
-  const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
   const [emails, setEmails] = useState<GmailEmail[]>([]);
   const [select, setSelect] = useState<GmailEmail | null>(null);
   const [drafts, setDrafts] = useState<GmailDraft[]>([]);
@@ -51,15 +42,11 @@ export default function GmailPanel() {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [gs, its] = await Promise.allSettled([
-        gmail.googleStatus(),
-        fetchIntegrationsStatus(),
-      ]);
+      const gs = await gmail.googleStatus().catch(() => null);
       const s = await gmail.status();
       setConnected(s.connected);
       setAccount(s.email ?? null);
-      setGoogleStatus(gs.status === "fulfilled" ? gs.value : null);
-      setIntegrations(its.status === "fulfilled" ? its.value : null);
+      setGoogleStatus(gs);
     } catch (err) {
       if (err instanceof GmailUnavailable) setUnavailable(true);
     }
@@ -257,24 +244,6 @@ export default function GmailPanel() {
             Connect Google
           </button>
         )}
-      </div>
-
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {INTEGRATION_PLATFORMS.map((platform) => {
-          const state = integrations?.[platform] ?? null;
-          const active = integrationActive(state);
-          return (
-            <span
-              key={platform}
-              className={`rounded-full px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider ${
-                active ? "bg-holo-mint/10 text-holo-mint" : "bg-white/[0.03] text-holo-dim"
-              }`}
-              title={`${integrationLabel(platform)} — ${integrationStatusLabel(state)}${state?.detail ? ` (${state.detail})` : ""}`}
-            >
-              {integrationLabel(platform)}
-            </span>
-          );
-        })}
       </div>
 
       {googleStatus && (

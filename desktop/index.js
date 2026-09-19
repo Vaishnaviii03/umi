@@ -1,7 +1,8 @@
 "use strict";
 
 const path = require("path");
-const { app, BrowserWindow, Menu, session, net, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, session, ipcMain } = require("electron");
+const net = require("node:net"); // Node's socket module (Electron's `net` is HTTP-only)
 const fs = require("fs");
 
 const { config } = require("./config");

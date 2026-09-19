@@ -30,3 +30,54 @@ export function isDuplicateCommit(previous: string, next: string): boolean {
   }
   return false;
 }
+
+const INTERRUPT_SET = new Set([
+  "stop",
+  "umi stop",
+  "stop umi",
+  "stop please",
+  "please stop",
+  "wait",
+  "umi wait",
+  "wait umi",
+  "hold on",
+  "umi hold on",
+  "hold on umi",
+  "pause",
+  "pause umi",
+  "umi pause",
+  "quiet",
+  "be quiet",
+  "shut up",
+  "shh",
+  "stop it",
+  "stop now",
+  "stop talking",
+  "stop speaking",
+]);
+
+/**
+ * Identify voice interruption commands (e.g. "stop", "umi stop", "wait", "hold on")
+ * to immediately cut off speech playback and acknowledge Boss.
+ */
+export function isInterruptionPhrase(text: string): boolean {
+  const cleaned = (text ?? "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!cleaned) return false;
+  if (INTERRUPT_SET.has(cleaned)) return true;
+  const words = cleaned.split(" ");
+  if (words.length <= 4) {
+    if (
+      words.includes("stop") ||
+      (words.includes("hold") && words.includes("on")) ||
+      words.includes("pause") ||
+      words.includes("wait")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}

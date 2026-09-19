@@ -24,6 +24,7 @@ type ChatApi = {
   /** Abort the in-flight request for the current turn (barge-in). */
   cancel: () => void;
   reset: () => void;
+  appendMessage: (role: ChatRole, text: string) => void;
 };
 
 function newId(): string {
@@ -294,5 +295,11 @@ export function useChat(
     setMessages([]);
   }, [storage]);
 
-  return { messages, session, send, sendProactive, cancel, reset };
+  const appendMessage = useCallback((role: ChatRole, text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setMessages((prev) => [...prev, { id: newId(), role, text: trimmed }]);
+  }, []);
+
+  return { messages, session, send, sendProactive, cancel, reset, appendMessage };
 }

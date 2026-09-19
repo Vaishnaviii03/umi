@@ -3,6 +3,8 @@ import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any, Optional
+import asyncio
 
 from openai import OpenAI, OpenAIError
 
@@ -12,9 +14,10 @@ from app.tools import ToolContext, ToolError, ToolResult, tool_manager, tool_reg
 logger = logging.getLogger("umi.llm")
 
 # Per-turn latency telemetry (dev logging keyed by http request).
-DEFAULT_MAX_TOKENS = 1024
-FAST_MAX_TOKENS_TEXT = 512
-VOICE_MAX_TOKENS = 200
+DEFAULT_MAX_TOKENS = 250
+FAST_MAX_TOKENS_TEXT = 200
+VOICE_MAX_TOKENS = 150
+
 
 # How many LLM↔tool round trips a single turn may make before being forced to
 # answer with what it has. Keeps runaway tool chains from looping forever.
@@ -31,6 +34,7 @@ class _ToolCallRef:
 
     id: str
     function: "_ToolCallFunctionRef"
+    extra_content: dict | None = None
 
 
 @dataclass
@@ -57,9 +61,35 @@ class LLMManager:
     complex queries keep the configured flagship model.
     """
 
+    _gemini_client: Any = None
+    _primary_exhausted_until: float = 0.0
+
     def __init__(self) -> None:
         self._client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
         self._model = settings.llm_model
+        self._gemini_client = (
+            OpenAI(api_key=settings.gemini_api_key, base_url=settings.gemini_base_url)
+            if settings.gemini_api_key
+            else None
+        )
+        self._primary_exhausted_until: float = 0.0
+
+    @staticmethod
+    def _is_exhaustion_error(exc: Exception) -> bool:
+        err_msg = str(exc).lower()
+        return any(
+            hint in err_msg
+            for hint in (
+                "402",
+                "429",
+                "insufficient credits",
+                "credits",
+                "quota",
+                "rate limit",
+                "free-models-per-day",
+                "payment required",
+            )
+        )
 
     @staticmethod
     def _build_messages(
@@ -105,7 +135,21 @@ class LLMManager:
         tools: list[dict] | None = None,
     ):
         """Run one completion, falling back to a tool-less request if the model
-        rejects the tool payload (keeps non-tool turns working on every model)."""
+        rejects the tool payload, and seamlessly falling back to Google Gemini if
+        primary OpenRouter daily credits / rate limits are exhausted."""
+        if max_tokens:
+            max_tokens = min(max_tokens, 250)
+
+        now = time.time()
+        # If primary OpenRouter was recently exhausted, route directly to Gemini fallback
+        if self._gemini_client and now < self._primary_exhausted_until:
+            return self._create_gemini(
+                messages=messages,
+                max_tokens=max_tokens,
+                stream=stream,
+                tools=tools,
+            )
+
         try:
             return self._client.chat.completions.create(
                 model=model,
@@ -115,18 +159,100 @@ class LLMManager:
                 tools=tools,
                 tool_choice="auto" if tools else None,
             )
-        except OpenAIError:
+        except OpenAIError as exc:
+            if self._gemini_client and self._is_exhaustion_error(exc):
+                # Mark primary exhausted for 30 minutes before re-checking
+                self._primary_exhausted_until = now + 1800
+                logger.warning(
+                    "Primary LLM (%s) quota/credits exhausted (%s). Seamlessly falling back to Google Gemini (%s).",
+                    model,
+                    exc,
+                    settings.gemini_model,
+                )
+                return self._create_gemini(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    stream=stream,
+                    tools=tools,
+                )
+
             if tools:
                 logger.warning("model %s rejected tool payload; retrying without tools", model)
-                return self._client.chat.completions.create(
+                try:
+                    return self._client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                    )
+                except OpenAIError as inner_exc:
+                    if self._gemini_client and self._is_exhaustion_error(inner_exc):
+                        self._primary_exhausted_until = now + 1800
+                        logger.warning(
+                            "Primary LLM exhausted on retry (%s). Seamlessly falling back to Google Gemini.",
+                            inner_exc,
+                        )
+                        return self._create_gemini(
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            stream=stream,
+                            tools=None,
+                        )
+                    raise
+            raise
+
+    def _create_gemini(
+        self,
+        *,
+        messages: list[dict],
+        max_tokens: int,
+        stream: bool,
+        tools: list[dict] | None = None,
+    ):
+        models = [
+            settings.gemini_model,
+            "gemini-flash-lite-latest",
+            "gemini-3.1-flash-lite",
+            "gemini-3.6-flash",
+        ]
+        seen: set[str] = set()
+        candidate_models = [m for m in models if m and not (m in seen or seen.add(m))]
+
+        last_exc: Exception | None = None
+        for model in candidate_models:
+            try:
+                return self._gemini_client.chat.completions.create(
                     model=model,
                     messages=messages,
                     max_tokens=max_tokens,
                     stream=stream,
+                    tools=tools,
+                    tool_choice="auto" if tools else None,
                 )
-            raise
+            except OpenAIError as exc:
+                last_exc = exc
+                err_str = str(exc).lower()
+                # If tool payload was rejected, retry without tools on this model
+                if tools and ("tool" in err_str or "unsupported" in err_str):
+                    logger.warning("Gemini model %s rejected tool payload; retrying without tools", model)
+                    try:
+                        return self._gemini_client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            stream=stream,
+                        )
+                    except OpenAIError as inner_exc:
+                        last_exc = inner_exc
+                # If quota/rate limit error, try the next model candidate
+                if "429" in str(exc) or "quota" in err_str or "resource_exhausted" in err_str:
+                    logger.warning("Gemini model %s quota exceeded; trying next model in pool", model)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
 
-    def _run_tool_call(self, call) -> ToolResult:
+    def _run_tool_call(self, call, db=None) -> ToolResult:
         """Validate + execute a single LLM-proposed tool call, normalizing every
         failure into a ToolResult the LLM can answer naturally about."""
         name = call.function.name
@@ -136,7 +262,7 @@ class LLMManager:
                 args = {}
         except json.JSONDecodeError:
             return ToolResult.failure("tool arguments were not valid JSON")
-        ctx = ToolContext(user_id=str(settings.owner_id))
+        ctx = ToolContext(user_id=str(settings.owner_id), db=db)
         try:
             return tool_manager.execute_tool(name, args, ctx)
         except ToolError as exc:
@@ -152,6 +278,7 @@ class LLMManager:
         voice: bool = False,
         fast: bool = False,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        db=None,
     ) -> str:
         messages = self._build_messages(
             system=system, memories=memories, voice=voice, history=history, message=message
@@ -169,25 +296,30 @@ class LLMManager:
             tool_rounds = 0
             while choice.tool_calls:
                 tool_rounds += 1
+                tc_dicts = []
+                for tc in choice.tool_calls:
+                    extra = getattr(tc, "extra_content", None) or (getattr(tc, "model_extra", None) or {}).get("extra_content")
+                    tc_dict = {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments or "",
+                        },
+                    }
+                    if extra:
+                        tc_dict["extra_content"] = extra
+                    tc_dicts.append(tc_dict)
+
                 messages.append(
                     {
                         "role": "assistant",
                         "content": choice.content or None,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments or "",
-                                },
-                            }
-                            for tc in choice.tool_calls
-                        ],
+                        "tool_calls": tc_dicts,
                     }
                 )
                 for tc in choice.tool_calls:
-                    result = self._run_tool_call(tc)
+                    result = self._run_tool_call(tc, db)
                     messages.append(
                         {"role": "tool", "tool_call_id": tc.id, "content": result.to_json()}
                     )
@@ -222,6 +354,8 @@ class LLMManager:
         fast: bool = False,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         metrics: dict | None = None,
+        abort_event: Optional[asyncio.Event] = None,
+        db=None,
     ) -> Iterator[str]:
         """Stream the assistant's reply as text chunks (content only).
 
@@ -231,6 +365,7 @@ class LLMManager:
         ToolManager and a follow-up completion streams the natural-language
         answer (bounded by ``TOOL_MAX_ROUNDS``). `metrics` is filled with
         llm_first_token_ms / llm_total_ms (+ tool_rounds) for latency logging.
+        If `abort_event` is set, streaming stops and the iterator ends early.
         """
         messages = self._build_messages(
             system=system, memories=memories, voice=voice, history=history, message=message
@@ -252,13 +387,16 @@ class LLMManager:
                 tool_calls: dict[int, dict] = {}
                 content_parts: list[str] = []
                 for chunk in stream:
+                    if abort_event is not None and abort_event.is_set():
+                        return
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index if tc_delta.index is not None else 0
                             slot = tool_calls.setdefault(
-                                tc_delta.index, {"id": "", "name": "", "arguments": ""}
+                                idx, {"id": "", "name": "", "arguments": "", "extra_content": None}
                             )
                             if tc_delta.id:
                                 slot["id"] = tc_delta.id
@@ -268,6 +406,9 @@ class LLMManager:
                                     slot["name"] += fn.name
                                 if fn.arguments:
                                     slot["arguments"] += fn.arguments
+                            extra = getattr(tc_delta, "extra_content", None) or (getattr(tc_delta, "model_extra", None) or {}).get("extra_content")
+                            if extra:
+                                slot["extra_content"] = extra
                     if delta.content:
                         content_parts.append(delta.content)
                         if not tool_calls:
@@ -290,27 +431,32 @@ class LLMManager:
                                 name=slot["name"],
                                 arguments=slot["arguments"] or "{}",
                             ),
+                            extra_content=slot.get("extra_content"),
                         )
                     )
+                tc_dicts = []
+                for call in completed:
+                    tc_dict = {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                    if call.extra_content:
+                        tc_dict["extra_content"] = call.extra_content
+                    tc_dicts.append(tc_dict)
+
                 messages.append(
                     {
                         "role": "assistant",
                         "content": "".join(content_parts) or None,
-                        "tool_calls": [
-                            {
-                                "id": call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.function.name,
-                                    "arguments": call.function.arguments,
-                                },
-                            }
-                            for call in completed
-                        ],
+                        "tool_calls": tc_dicts,
                     }
                 )
                 for call in completed:
-                    result = self._run_tool_call(call)
+                    result = self._run_tool_call(call, db)
                     messages.append(
                         {"role": "tool", "tool_call_id": call.id, "content": result.to_json()}
                     )

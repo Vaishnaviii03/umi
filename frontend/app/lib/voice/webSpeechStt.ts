@@ -101,5 +101,8 @@ export function createWebSpeechStt(callbacks: SttCallbacks): SttController {
       recognition = null;
       rec?.abort();
     },
+    setBargeInMode: () => {
+      // Barge-in mode handled at application level.
+    },
   };
 }

@@ -32,18 +32,3 @@ def clean_tables(db_session):
     db_session.query(models.Conversation).delete()
     db_session.commit()
     yield
-
-
-@pytest.fixture(autouse=True)
-def no_integration_tokens(monkeypatch):
-    """Keep tests hermetic from backend/.env credentials.
-
-    Real bot/owner values in .env must never leak into the suite or trigger
-    live network calls (e.g. a supervisor thread hitting the Telegram API).
-    Tests that need tokens set them explicitly on the settings singleton.
-    """
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "discord_bot_token", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "")
-    yield

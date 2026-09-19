@@ -22,7 +22,8 @@ export type UmiStateKey =
   | "THINKING"
   | "SPEAKING"
   | "EXECUTING"
-  | "ERROR";
+  | "ERROR"
+  | "GREETING";
 
 export const UMI_STATE_LABELS: Record<UmiStateKey, string> = {
   BOOTING: "Bringing Umi online",
@@ -32,6 +33,7 @@ export const UMI_STATE_LABELS: Record<UmiStateKey, string> = {
   SPEAKING: "Speaking",
   EXECUTING: "Executing",
   ERROR: "Attention needed",
+  GREETING: "Greeting",
 };
 
 type UmiContextValue = {
@@ -45,6 +47,10 @@ type UmiContextValue = {
   /** Mark the Umi presence as "speaking" briefly. Reserved for the future
    *  TTS pipeline; the chat surface uses it as a reply-arrival cue today. */
   speak: (durationMs?: number) => void;
+  /** Transition to GREETING state and optionally provide greeting text */
+  greet: (text?: string) => void;
+  /** Mark greeting as complete, transition to READY */
+  endGreeting: () => void;
 };
 
 const UmiStateContext = createContext<UmiContextValue | null>(null);
@@ -85,7 +91,7 @@ export function UmiProvider({ children }: { children: ReactNode }) {
     [clearTimer],
   );
 
-  const clearError = useCallback(() => {
+const clearError = useCallback(() => {
     clearTimer();
     setError(null);
     setState("READY");
@@ -109,9 +115,35 @@ export function UmiProvider({ children }: { children: ReactNode }) {
     [transition],
   );
 
+  const greet = useCallback(
+    (text?: string) => {
+      // Store greeting text in sessionStorage for components that need it
+      if (text) {
+        sessionStorage.setItem("umi_greeting_text", text);
+      }
+      transition("GREETING");
+    },
+    [transition],
+  );
+
+  const endGreeting = useCallback(() => {
+    transition("READY");
+  }, [transition]);
+
   return (
     <UmiStateContext.Provider
-      value={{ state, error, transition, fail, clearError, beginListening, endListening, speak }}
+      value={{
+        state,
+        error,
+        transition,
+        fail,
+        clearError,
+        beginListening,
+        endListening,
+        speak,
+        greet,
+        endGreeting,
+      }}
     >
       {children}
     </UmiStateContext.Provider>

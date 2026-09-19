@@ -10,6 +10,7 @@ const STATE_DOT: Record<UmiStateKey, string> = {
   SPEAKING: "bg-holo-magenta",
   EXECUTING: "bg-holo-cyan",
   ERROR: "bg-holo-danger",
+  GREETING: "bg-holo-cyan",
 };
 
 /**

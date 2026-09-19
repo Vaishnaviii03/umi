@@ -38,15 +38,16 @@ class StartupOrchestrator {
     });
 
     await this._step("context", STATES.LOADING_CONTEXT, async () => {
-      this._context.timeOfDay = this.greeting.bucketForHour(new Date().getHours());
-      this._context.startedAt = new Date().toISOString();
+      const now = new Date();
+      this._context.timeOfDay = this.greeting.bucketForHour(now.getHours());
+      this._context.startedAt = now.toISOString();
       return this._context;
     });
 
     this.stateMachine.transition(STATES.READY_TO_GREET);
     this._push(STATES.READY_TO_GREET, this._context);
 
-    const greeting = this.greeting.pickGreeting(new Date(), this._context);
+    const greeting = this.greeting.pickFullGreeting(new Date());
     this.stateMachine.transition(STATES.GREETING);
     this._push(STATES.GREETING, { ...this._context, greeting });
 

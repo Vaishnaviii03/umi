@@ -39,10 +39,51 @@ def test_registry_has_builtin_tools_registered():
     assert isinstance(tool_registry.get("get_time"), GetTimeTool)
 
 
+def test_registry_has_task_tools_registered():
+    for name in ("create_task", "list_tasks", "complete_task", "update_task", "delete_task"):
+        assert name in tool_registry.names()
+
+
 def test_registry_openai_tools_shape():
     tools = tool_registry.openai_tools()
     names = {t["function"]["name"] for t in tools}
-    assert names == {"calculate", "get_time"}
+    assert names == {
+        "calculate",
+        "get_time",
+        "create_task",
+        "list_tasks",
+        "complete_task",
+        "update_task",
+        "delete_task",
+"list_emails",
+            "get_email",
+            "search_emails",
+            "summarize_emails",
+            "compose_draft",
+            "send_email",
+            "list_events",
+            "summarize_calendar",
+            "create_event",
+            "update_event",
+            "delete_event",
+            "google_search_drive",
+            "google_read_drive_file",
+            "google_find_spreadsheet",
+            "google_read_sheet",
+            "google_write_sheet",
+            "google_create_spreadsheet",
+            "google_find_document",
+            "google_read_document",
+            "google_create_document",
+            "google_update_document",
+            "google_search_youtube",
+            "google_youtube_video_info",
+            "google_youtube_list_uploads",
+            "google_youtube_update_video",
+            "google_youtube_upload_video",
+            "google_youtube_delete_video",
+            "describe_visual_scene",
+        }
     calc = next(t for t in tools if t["function"]["name"] == "calculate")
     assert calc["type"] == "function"
     props = calc["function"]["parameters"]["properties"]

@@ -35,9 +35,7 @@ in `docs/superpowers/plans/2026-09-08-umi-conversational-architecture.md`.
 ## 2. Conversation / session lifecycle
 
 - **Conversation = the persisted thread.** Every turn resolves to a row in
-  `conversations` (via `get_or_create_conversation`). The desktop conversation
-  is matched by `conversation_id` or a per-source key; platform adapters
-  (Telegram/Discord) get their own isolated threads via `conversation_key`.
+  `conversations` (via `get_or_create_conversation`), matched by `conversation_id`.
 - **The id is sticky across reloads.** `lib/chat.ts`
   (`readStoredConversationId` / `storeConversationId`) persists the id in
   `sessionStorage` under `umi_conversation_id`; `useChat` restores it on mount

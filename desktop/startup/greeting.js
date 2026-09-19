@@ -2,31 +2,41 @@
 
 const GREETINGS = Object.freeze({
   morning: [
-    "Good morning. I'm online.",
-    "Good morning. What are we working on today?",
-    "Good morning. Systems are online — how can I help?",
+    "Good morning, Boss.",
+    "Good morning, Boss. Ready to get started?",
+    "Good morning, Boss. What are we working on today?",
   ],
   afternoon: [
-    "Good afternoon. I'm ready.",
-    "Good afternoon. What can I do for you?",
-    "Good afternoon. Systems are online.",
+    "Good afternoon, Boss.",
+    "Good afternoon, Boss. How's the day going?",
+    "Afternoon, Boss. Ready when you are.",
   ],
   evening: [
-    "Good evening. I'm online.",
-    "Good evening. How was your day?",
-    "Good evening. What should we take care of?",
+    "Good evening, Boss.",
+    "Good evening, Boss. What are we building tonight?",
+    "Evening, Boss. What's on the agenda?",
   ],
   night: [
-    "It's late — I'm here if you need me.",
-    "Good night shift. Systems are online.",
-    "I'm online whenever you need me.",
+    "You're up late, Boss.",
+    "Late night, Boss. What are we working on?",
+    "Hey, Boss. Still building?",
   ],
 });
 
+const GREETING_CONFIG = Object.freeze({
+  morning_start: 5,
+  morning_end: 11,
+  afternoon_start: 12,
+  afternoon_end: 16,
+  evening_start: 17,
+  evening_end: 20,
+});
+
 function bucketForHour(hour) {
-  if (hour >= 5 && hour < 12) return "morning";
-  if (hour >= 12 && hour < 17) return "afternoon";
-  if (hour >= 17 && hour < 21) return "evening";
+  const c = GREETING_CONFIG;
+  if (c.morning_start <= hour && hour <= c.morning_end) return "morning";
+  if (c.afternoon_start <= hour && hour <= c.afternoon_end) return "afternoon";
+  if (c.evening_start <= hour && hour <= c.evening_end) return "evening";
   return "night";
 }
 
@@ -37,4 +47,41 @@ function pickGreeting(date = new Date(), { bucket } = {}) {
   return options[seed];
 }
 
-module.exports = { pickGreeting, bucketForHour, GREETINGS };
+function pickFullGreeting(date = new Date()) {
+  const hour = date.getHours();
+  const period = bucketForHour(hour);
+  const options = GREETINGS[period] || GREETINGS.night;
+  const variantIndex = Math.floor(date.getMinutes() / 5) % options.length;
+  const baseGreeting = options[variantIndex];
+
+  // Add follow-up based on time of day
+  const followUps = {
+    morning: [
+      "Ready to build something?",
+      "What are we working on today?",
+      "How can I help?",
+    ],
+    afternoon: [
+      "How's the day going?",
+      "Ready when you are.",
+      "What's next?",
+    ],
+    evening: [
+      "What are we building tonight?",
+      "What's on the agenda?",
+      "How can I help?",
+    ],
+    night: [
+      "What are we working on?",
+      "Still building?",
+      "How can I help?",
+    ],
+  };
+
+  const followUpsList = followUps[period] || ["How can I help?"];
+  const followUp = followUpsList[Math.floor(date.getMinutes() / 10) % followUpsList.length];
+
+  return `${baseGreeting} ${followUp}`;
+}
+
+module.exports = { pickGreeting, bucketForHour, pickFullGreeting, GREETINGS, GREETING_CONFIG };

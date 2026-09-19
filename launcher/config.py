@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -29,6 +30,20 @@ def _resolve_electron_bin(desktop_dir: Path) -> Path:
     return bin_dir / "electron"  # fallback; will fail loudly if missing
 
 
+def list_audio_input_devices() -> list[dict]:
+    """List available audio input devices with their indices and names."""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        return [
+            {"index": i, "name": d["name"], "channels": d["max_input_channels"]}
+            for i, d in enumerate(devices)
+            if d["max_input_channels"] > 0
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 class LauncherConfig:
     """Configuration for the UMI background launcher."""
 
@@ -41,9 +56,9 @@ class LauncherConfig:
     sensitivity: int = _int("UMI_SENSITIVITY", 60)
 
     # Timing (milliseconds)
-    min_gap_ms: int = _int("UMI_MIN_GAP_MS", 80)
-    max_interval_ms: int = _int("UMI_MAX_INTERVAL_MS", 400)
-    post_trigger_cooldown_ms: int = _int("UMI_POST_TRIGGER_COOLDOWN_MS", 8000)
+    min_gap_ms: int = _int("UMI_MIN_GAP_MS", 60)
+    max_interval_ms: int = _int("UMI_MAX_INTERVAL_MS", 500)
+    post_trigger_cooldown_ms: int = _int("UMI_POST_TRIGGER_COOLDOWN_MS", 3000)
 
     # Desktop app
     desktop_dir: Path = Path(os.environ.get("UMI_DESKTOP_DIR", str(HERE.parent / "desktop")))
@@ -63,3 +78,24 @@ class LauncherConfig:
     @property
     def quiet_threshold_db(self) -> float:
         return self.clap_threshold_db - 24.0
+
+    def get_input_devices(self) -> list[dict]:
+        """List available audio input devices."""
+        return list_audio_input_devices()
+
+    def select_device_interactive(self) -> Optional[int]:
+        """Interactively select microphone device."""
+        devices = self.get_input_devices()
+        if not devices or "error" in devices[0]:
+            print(f"Error listing devices: {devices}")
+            return None
+        print("Available input devices:")
+        for d in devices:
+            print(f"  [{d['index']}] {d['name']} ({d['channels']} ch)")
+        try:
+            choice = input("Select device index (Enter for default): ").strip()
+            if not choice:
+                return None
+            return int(choice)
+        except (ValueError, EOFError):
+            return None

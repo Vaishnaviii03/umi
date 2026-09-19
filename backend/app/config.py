@@ -1,6 +1,9 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
+_backend_dir = Path(__file__).resolve().parent.parent
+load_dotenv(_backend_dir / ".env")
 load_dotenv()
 
 
@@ -16,6 +19,13 @@ class Settings:
     # first-content tokens quickly (no long hidden reasoning). Falls back to
     # llm_model when unset.
     llm_fast_model: str = os.environ.get("LLM_FAST_MODEL", "openai/gpt-5.4-mini")
+
+    # Fallback LLM (e.g. Google Gemini when primary OpenRouter daily credits exhaust)
+    gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
+    gemini_base_url: str = os.environ.get(
+        "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+    gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
 
     def model_for(self, fast: bool) -> str:
         return self.llm_fast_model or self.llm_model if fast else self.llm_model
@@ -86,26 +96,7 @@ class Settings:
     def gmail_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
 
-    # Phase 8 — Discord + Telegram integrations. The tokens are server-side
-    # secrets; they are read from backend/.env and never exposed to the
-    # browser. Owner ids pin which platform user may speak to Umi; every other
-    # user receives a polite refusal with no LLM/tool/database access.
-    discord_application_id: str = os.environ.get("DISCORD_APPLICATION_ID", "")
-    discord_public_key: str = os.environ.get("DISCORD_PUBLIC_KEY", "")
-    discord_bot_token: str = os.environ.get("DISCORD_BOT_TOKEN", "")
-    discord_owner_id: str = os.environ.get("DISCORD_OWNER_ID", "")
-    telegram_bot_token: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    telegram_owner_id: str = os.environ.get("TELEGRAM_OWNER_ID", "")
-
-    @property
-    def discord_enabled(self) -> bool:
-        return bool(self.discord_bot_token)
-
-    @property
-    def telegram_enabled(self) -> bool:
-        return bool(self.telegram_bot_token)
-
-    # Phase 9 — idle/proactive conversation. Umi may open a conversation after
+    # Conversational behavior — idle/proactive conversation. Umi may open a conversation after
     # the owner has been quiet for `umi_idle_threshold_seconds`, at most once
     # per `umi_idle_cooldown_seconds`, and at most `umi_idle_max_prompts_per_hour`
     # times an hour, only between `umi_idle_start_hour` and `umi_idle_end_hour`

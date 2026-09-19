@@ -11,8 +11,8 @@ const config = Object.freeze({
   backendUrl: process.env.UMI_BACKEND_URL || `http://127.0.0.1:${Number(process.env.UMI_BACKEND_PORT || 8000)}`,
   frontendDir: process.env.UMI_FRONTEND_DIR || path.resolve(__dirname, "..", "frontend"),
   backendDir: process.env.UMI_BACKEND_DIR || path.resolve(__dirname, "..", "backend"),
-  musicFile: process.env.UMI_MUSIC_FILE || "",
-  musicCommand: process.env.UMI_MUSIC_COMMAND || "afplay",
+  musicFile: process.env.UMI_MUSIC_FILE || path.join(__dirname, "..", "assets", "startup.wav"),
+  musicCommand: process.env.UMI_MUSIC_COMMAND || "",
   startupTimeoutMs: Number(process.env.UMI_STARTUP_TIMEOUT_MS || 90000),
 });
 

@@ -86,12 +86,14 @@ test("due again after the cooldown", () => {
 });
 
 test("not due at the hourly cap", () => {
-  const due = idleTriggerDue({ ...BASE, proactiveCountLastHour: 4 });
+  const now = Date.UTC(2026, 8, 8, 14, 0, 0);
+  const due = idleTriggerDue({ ...BASE, proactiveCountLastHour: 4, nowMs: now });
   assert.equal(due, false);
 });
 
 test("due below the hourly cap", () => {
-  const due = idleTriggerDue({ ...BASE, proactiveCountLastHour: 3 });
+  const now = Date.UTC(2026, 8, 8, 14, 0, 0);
+  const due = idleTriggerDue({ ...BASE, proactiveCountLastHour: 3, nowMs: now });
   assert.equal(due, true);
 });
 

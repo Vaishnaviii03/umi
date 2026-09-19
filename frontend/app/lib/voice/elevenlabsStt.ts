@@ -1,4 +1,9 @@
-import { VOICE_CONNECTION_LOST, type SttCallbacks, type SttController } from "./stt";
+import {
+  VOICE_CONNECTION_LOST,
+  mapSttErrorMessage,
+  type SttCallbacks,
+  type SttController,
+} from "./stt";
 
 const STT_MODEL_ID = "scribe_v2_realtime";
 
@@ -32,13 +37,13 @@ export async function createElevenLabsStt(
   });
 
   connection.on(RealtimeEvents.SESSION_STARTED, () => {});
-  connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data) => {
+  connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data: { text?: string }) => {
     callbacks.onPartial(data?.text ?? "");
   });
-  connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (data) => {
+  connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (data: { text?: string }) => {
     callbacks.onCommitted(data?.text ?? "");
   });
-  connection.on(RealtimeEvents.ERROR, () => callbacks.onError(VOICE_CONNECTION_LOST));
+  connection.on(RealtimeEvents.ERROR, (detail) => callbacks.onError(mapSttErrorMessage(detail)));
   connection.on(RealtimeEvents.AUTH_ERROR, () => callbacks.onError(VOICE_CONNECTION_LOST));
 
   return {
@@ -48,5 +53,8 @@ export async function createElevenLabsStt(
     pause: async () => connection.mute(),
     resume: async () => connection.unmute(),
     end: async () => connection.close(),
+    setBargeInMode: () => {
+      // Barge-in mode handled at application level.
+    },
   };
 }

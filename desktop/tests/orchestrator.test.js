@@ -16,6 +16,7 @@ function quietLogger() {
 function fakeGaurds() {
   return {
     pickGreeting: () => "Good morning. I'm online.",
+    pickFullGreeting: () => "Good morning, Boss. Ready to get started?",
     bucketForHour: () => "morning",
   };
 }

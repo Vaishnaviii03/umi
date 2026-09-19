@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createElevenLabsStt } from "../lib/voice/elevenlabsStt";
 import { isWebSpeechSupported, createWebSpeechStt } from "../lib/voice/webSpeechStt";
 import { isDuplicateCommit, isMeaningfulTranscript } from "../lib/voice/turn";
-import type { SttController } from "../lib/voice/stt";
+import type { SttCallbacks, SttController } from "../lib/voice/stt";
 import { traceLatency } from "../lib/telemetry";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
@@ -34,13 +34,16 @@ export type VoiceSessionApi = {
  */
 export function useVoiceSession(dependencies: {
   onCommittedText: (text: string) => void;
+  onPartialText?: (text: string) => void;
 }): VoiceSessionApi {
-  const { onCommittedText } = dependencies;
+  const { onCommittedText, onPartialText } = dependencies;
   const onCommittedRef = useRef(onCommittedText);
+  const onPartialRef = useRef(onPartialText);
 
   useEffect(() => {
     onCommittedRef.current = onCommittedText;
-  }, [onCommittedText]);
+    onPartialRef.current = onPartialText;
+  }, [onCommittedText, onPartialText]);
 
   const [active, setActive] = useState(false);
   const activeRef = useRef(false);
@@ -51,6 +54,7 @@ export function useVoiceSession(dependencies: {
   const controllerRef = useRef<SttController | null>(null);
   const lastCommitRef = useRef("");
   const lastPartialAtRef = useRef(0);
+  const failoverRef = useRef(false);
 
   const stopSession = useCallback(async () => {
     const controller = controllerRef.current;
@@ -79,27 +83,60 @@ export function useVoiceSession(dependencies: {
     setError(null);
     setPartial("");
     lastCommitRef.current = "";
+    failoverRef.current = false;
 
-    const callbacks = {
-      onPartial: (text: string) => {
-        lastPartialAtRef.current = performance.now();
-        setPartial(text);
-      },
-      onCommitted: (text: string) => {
-        if (!isMeaningfulTranscript(text)) return;
-        if (isDuplicateCommit(lastCommitRef.current, text)) return;
-        if (lastPartialAtRef.current > 0) {
-          traceLatency({
-            stt_commit_ms: Math.round(performance.now() - lastPartialAtRef.current),
-          });
-          lastPartialAtRef.current = 0;
-        }
-        lastCommitRef.current = text;
-        setPartial("");
-        onCommittedRef.current(text);
-      },
-      onError: handleError,
+    const onPartial = (text: string) => {
+      lastPartialAtRef.current = performance.now();
+      setPartial(text);
+      onPartialRef.current?.(text);
     };
+    const onCommitted = (text: string) => {
+      if (!isMeaningfulTranscript(text)) return;
+      if (isDuplicateCommit(lastCommitRef.current, text)) return;
+      if (lastPartialAtRef.current > 0) {
+        traceLatency({
+          stt_commit_ms: Math.round(performance.now() - lastPartialAtRef.current),
+        });
+        lastPartialAtRef.current = 0;
+      }
+      lastCommitRef.current = text;
+      setPartial("");
+      onCommittedRef.current(text);
+    };
+
+    // Terminal error: show the message and tear the whole session down.
+    const fatalError = handleError;
+
+    // ElevenLabs provider error handler: transparently hand the live, still-
+    // active session over to the browser Web Speech API instead of stopping.
+    // One attempt only — if the fallback fails too, surface a real error.
+    const failoverOnError = (message: string) => {
+      if (failoverRef.current) {
+        fatalError(message);
+        return;
+      }
+      if (!isWebSpeechSupported()) {
+        fatalError("Voice is unavailable on this device.");
+        return;
+      }
+      failoverRef.current = true;
+      const old = controllerRef.current;
+      controllerRef.current = null;
+      if (old) void old.end();
+
+      const webCallbacks: SttCallbacks = { onPartial, onCommitted, onError: fatalError };
+      try {
+        const wc = createWebSpeechStt(webCallbacks);
+        controllerRef.current = wc;
+        void wc.begin();
+        setMode("webspeech");
+      } catch {
+        fatalError("Voice is unavailable on this device.");
+      }
+    };
+
+    const callbacks: SttCallbacks = { onPartial, onCommitted, onError: failoverOnError };
+    const webCallbacks: SttCallbacks = { onPartial, onCommitted, onError: fatalError };
 
     let controller: SttController | null = null;
 
@@ -129,7 +166,7 @@ export function useVoiceSession(dependencies: {
         return;
       }
       try {
-        controller = createWebSpeechStt(callbacks);
+        controller = createWebSpeechStt(webCallbacks);
         setMode("webspeech");
       } catch {
         await stopSession();

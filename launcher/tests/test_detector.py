@@ -103,3 +103,56 @@ def test_claps_too_far_apart_do_not_trigger():
     out = det.process_block(_clap(-12), timestamp=clock())
     assert not out
     assert det.trigger_count == 0
+
+
+def test_speech_fluctuations_do_not_trigger():
+    """Simulates speech bursts (-22 dB to -16 dB) with irregular syllables."""
+    det, clock = make_detector(clap_threshold_db=-14.0, quiet_threshold_db=-38.0)
+    np.random.seed(42)
+    triggered = False
+    for _ in range(200):  # 4 seconds of simulated speech
+        clock.advance(0.02)
+        # Speech pattern: alternating between low-energy vowels and moderate consonants
+        amp_db = np.random.uniform(-35.0, -18.0)
+        block = _clap(amp_db, seconds=0.02)
+        if det.process_block(block, timestamp=clock()):
+            triggered = True
+    assert not triggered
+    assert det.trigger_count == 0
+
+
+def test_fast_typing_clicks_do_not_trigger():
+    """Simulates mechanical keyboard clicks with sharp transients and no quiet gaps."""
+    det, clock = make_detector(min_gap_ms=80, quiet_threshold_db=-38.0)
+    triggered = False
+    for _ in range(50):
+        clock.advance(0.03)  # Rapid keystrokes every 30ms (< min_gap_ms)
+        click = _clap(-12.0, seconds=0.01)
+        if det.process_block(click, timestamp=clock()):
+            triggered = True
+    assert not triggered
+    assert det.trigger_count == 0
+
+
+def test_post_trigger_cooldown_prevents_immediate_retrigger():
+    """Verifies that cooldown prevents multiple launches from applause or echoes."""
+    det, clock = make_detector(min_gap_ms=40, post_trigger_cooldown_ms=5000)
+    # Trigger first double clap
+    det.process_block(_clap(-12), timestamp=clock())
+    feed_quiet(clock, det, 0.1)
+    assert det.process_block(_clap(-12), timestamp=clock())
+    assert det.trigger_count == 1
+
+    # Attempt another double clap 1 second later (inside 5s cooldown)
+    clock.advance(1.0)
+    det.process_block(_clap(-12), timestamp=clock())
+    feed_quiet(clock, det, 0.1)
+    assert not det.process_block(_clap(-12), timestamp=clock())
+    assert det.trigger_count == 1
+
+    # Attempt after cooldown expires (6 seconds total)
+    clock.advance(5.0)
+    det.process_block(_clap(-12), timestamp=clock())
+    feed_quiet(clock, det, 0.1)
+    assert det.process_block(_clap(-12), timestamp=clock())
+    assert det.trigger_count == 2

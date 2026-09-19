@@ -24,8 +24,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       style={{ colorScheme: "dark" }}
+      suppressHydrationWarning
     >
-      <body className="flex h-full flex-col">{children}</body>
+      <body className="flex h-full flex-col" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }

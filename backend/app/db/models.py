@@ -41,8 +41,8 @@ class Conversation(Base):
         Uuid(as_uuid=True), ForeignKey("users.id"), index=True
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="Conversation")
-    # Phase 8 — per-platform conversation threads. Desktop/voice rows default
-    # to source='desktop' with a null key; Discord/Telegram rows add their own.
+    # Multi-channel conversation threads. Desktop/voice rows default
+    # to source='desktop' with a null key.
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="desktop")
     conversation_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Phase 9 — greeting-once entitlement. Stays NULL until a launch greeting
